@@ -504,11 +504,23 @@ var ExprScope;
      * The scope of an [[Expr]] used in a [[Technique]] `when` condition.
      */
     ExprScope[ExprScope["Condition"] = 1] = "Condition";
+    /**
+     * The scope of an [[Expr]] used as dynamic property attribute value.
+     */
+    ExprScope[ExprScope["Dynamic"] = 2] = "Dynamic";
 })(ExprScope = exports.ExprScope || (exports.ExprScope = {}));
 /**
  * Abstract class defining a shape of a [[Theme]]'s expression
  */
 class Expr {
+    /**
+     * Tests of given value is an [[Expr]].
+     *
+     * @param value The object to test.
+     */
+    static isExpr(value) {
+        return value instanceof Expr;
+    }
     /**
      * Creates an expression from the given `code`.
      *
@@ -757,6 +769,25 @@ class VarExpr extends Expr {
 }
 exports.VarExpr = VarExpr;
 class LiteralExpr extends Expr {
+    /**
+     * Create a [[LiteralExpr]] from the given value.
+     *
+     * @param value A constant value.
+     */
+    static fromValue(value) {
+        switch (typeof value) {
+            case "boolean":
+                return new BooleanLiteralExpr(value);
+            case "number":
+                return new NumberLiteralExpr(value);
+            case "string":
+                return new StringLiteralExpr(value);
+            case "object":
+                return value === null ? NullLiteralExpr.instance : new ObjectLiteralExpr(value);
+            default:
+                throw new Error(`failed to create a literal from '${value}'`);
+        } // switch
+    }
 }
 exports.LiteralExpr = LiteralExpr;
 /**
@@ -1013,6 +1044,7 @@ class ExprSerializer {
  * SPDX-License-Identifier: Apache-2.0
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+const Expr_1 = __webpack_require__(/*! ./Expr */ "../harp-datasource-protocol/lib/Expr.ts");
 const ArrayOperators_1 = __webpack_require__(/*! ./operators/ArrayOperators */ "../harp-datasource-protocol/lib/operators/ArrayOperators.ts");
 const CastOperators_1 = __webpack_require__(/*! ./operators/CastOperators */ "../harp-datasource-protocol/lib/operators/CastOperators.ts");
 const ColorOperators_1 = __webpack_require__(/*! ./operators/ColorOperators */ "../harp-datasource-protocol/lib/operators/ColorOperators.ts");
@@ -1035,12 +1067,52 @@ class ExprEvaluatorContext {
         this.env = env;
         this.scope = scope;
         this.cache = cache;
+        this.m_partialEvaluation = false;
     }
+    /**
+     * `true` if the this context is used to partially evaluate expressions.
+     */
+    get partialEvaluation() {
+        return this.m_partialEvaluation;
+    }
+    /**
+     * Evaluate the given expression.
+     *
+     * @param expr The [[Expr]] to evaluate.
+     */
     evaluate(expr) {
         if (expr !== undefined) {
             return expr.accept(this.evaluator, this);
         }
         throw new Error("Failed to evaluate expression");
+    }
+    /**
+     * Partially evaluate the given expression.
+     *
+     * @param expr The [[Expr]] to evaluate.
+     */
+    partiallyEvaluate(expr) {
+        if (expr === undefined) {
+            throw new Error("Failed to evaluate expression");
+        }
+        const previousEvaluationMode = this.m_partialEvaluation;
+        this.m_partialEvaluation = true;
+        try {
+            const value = expr.accept(this.evaluator, this);
+            this.m_partialEvaluation = previousEvaluationMode;
+            if (value instanceof Expr_1.Expr) {
+                return value;
+            }
+            return Expr_1.LiteralExpr.fromValue(value);
+        }
+        catch (error) {
+            // rethrow the exception
+            throw error;
+        }
+        finally {
+            // reset the evaluation mode.
+            this.m_partialEvaluation = previousEvaluationMode;
+        }
     }
 }
 exports.ExprEvaluatorContext = ExprEvaluatorContext;
@@ -1109,47 +1181,22 @@ class ExprEvaluator {
         return context.evaluate(match.fallback);
     }
     visitCallExpr(expr, context) {
-        switch (expr.op) {
-            case "all":
-                for (const childExpr of expr.args) {
-                    if (!childExpr.accept(this, context)) {
-                        return false;
-                    }
-                }
-                return true;
-            case "any":
-                for (const childExpr of expr.args) {
-                    if (childExpr.accept(this, context)) {
-                        return true;
-                    }
-                }
-                return false;
-            case "none":
-                for (const childExpr of expr.args) {
-                    if (childExpr.accept(this, context)) {
-                        return false;
-                    }
-                }
-                return true;
-            default: {
-                if (context.cache !== undefined) {
-                    const v = context.cache.get(expr);
-                    if (v !== undefined) {
-                        return v;
-                    }
-                }
-                const descriptor = expr.descriptor || operatorDescriptors.get(expr.op);
-                if (descriptor) {
-                    expr.descriptor = descriptor;
-                    const result = descriptor.call(context, expr);
-                    if (context.cache) {
-                        context.cache.set(expr, result);
-                    }
-                    return result;
-                }
-                throw new Error(`undefined operator '${expr.op}`);
+        if (context.cache !== undefined) {
+            const v = context.cache.get(expr);
+            if (v !== undefined) {
+                return v;
             }
-        } // switch
+        }
+        const descriptor = expr.descriptor || operatorDescriptors.get(expr.op);
+        if (descriptor) {
+            expr.descriptor = descriptor;
+            const result = descriptor.call(context, expr);
+            if (context.cache) {
+                context.cache.set(expr, result);
+            }
+            return result;
+        }
+        throw new Error(`undefined operator '${expr.op}`);
     }
 }
 exports.ExprEvaluator = ExprEvaluator;
@@ -1900,19 +1947,22 @@ exports.addExtrudedWalls = addExtrudedWalls;
  * SPDX-License-Identifier: Apache-2.0
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-const three_1 = __webpack_require__(/*! three */ "three");
+const THREE = __webpack_require__(/*! three */ "three");
 const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
+const Env_1 = __webpack_require__(/*! ./Env */ "../harp-datasource-protocol/lib/Env.ts");
 const ExponentialInterpolant_1 = __webpack_require__(/*! ./ExponentialInterpolant */ "../harp-datasource-protocol/lib/ExponentialInterpolant.ts");
+const Expr_1 = __webpack_require__(/*! ./Expr */ "../harp-datasource-protocol/lib/Expr.ts");
 const InterpolatedPropertyDefs_1 = __webpack_require__(/*! ./InterpolatedPropertyDefs */ "../harp-datasource-protocol/lib/InterpolatedPropertyDefs.ts");
 const StringEncodedNumeral_1 = __webpack_require__(/*! ./StringEncodedNumeral */ "../harp-datasource-protocol/lib/StringEncodedNumeral.ts");
 const logger = harp_utils_1.LoggerManager.instance.create("InterpolatedProperty");
 const interpolants = [
-    three_1.DiscreteInterpolant,
-    three_1.LinearInterpolant,
-    three_1.CubicInterpolant,
+    THREE.DiscreteInterpolant,
+    THREE.LinearInterpolant,
+    THREE.CubicInterpolant,
     ExponentialInterpolant_1.ExponentialInterpolant
 ];
-const tmpColor = new three_1.Color();
+const tmpColor = new THREE.Color();
+const tmpBuffer = new Array(StringEncodedNumeral_1.StringEncodedNumeralFormatMaxSize);
 /**
  * Checks if a property is interpolated.
  * @param p property to be checked
@@ -1948,40 +1998,46 @@ function isInterpolatedProperty(p) {
 }
 exports.isInterpolatedProperty = isInterpolatedProperty;
 /**
- * Get the value of the specified property at the given zoom level.
+ * A temp [[Env]] containing the arguments passed to `getPropertyValue`.
  *
- * @param property Property of a technique.
- * @param level Display level the property should be rendered at.
- * @param pixelToMeters Optional pixels to meters conversion factor (needed for proper
- * interpolation of `length` values).
+ * [[dynamicPropertiesTempEnv]] is used when `getPropertyValue` is
+ * invoked with explicit values for `zoom` and `pixelToMeters` instead
+ * of with an [[Env]].
  *
+ * @hidden
  */
-function getPropertyValue(property, level, pixelToMeters = 1.0) {
-    if (isInterpolatedPropertyDefinition(property)) {
-        throw new Error("Cannot interpolate a InterpolatedPropertyDefinition.");
+const dynamicPropertiesTempEnv = new Env_1.MapEnv({
+    $zoom: 0,
+    $pixelToMeters: 1
+});
+function getPropertyValue(property, envOrLevel, pixelToMeters = 1.0) {
+    if (Expr_1.Expr.isExpr(property)) {
+        let env;
+        if (typeof envOrLevel === "number") {
+            dynamicPropertiesTempEnv.entries.$zoom = envOrLevel;
+            dynamicPropertiesTempEnv.entries.$pixelToMeters = pixelToMeters;
+            env = dynamicPropertiesTempEnv;
+        }
+        else {
+            env = envOrLevel;
+        }
+        return property.evaluate(env, Expr_1.ExprScope.Dynamic);
     }
-    else if (!isInterpolatedProperty(property)) {
+    let level;
+    if (typeof envOrLevel === "number") {
+        level = envOrLevel;
+    }
+    else {
+        level = envOrLevel.lookup("$zoom");
+        pixelToMeters = envOrLevel.lookup("$pixelToMeters");
+    }
+    if (!isInterpolatedProperty(property)) {
         if (typeof property !== "string") {
             return property;
         }
         else {
-            const matchedFormat = StringEncodedNumeral_1.StringEncodedNumeralFormats.find(format => format.regExp.test(property));
-            if (matchedFormat === undefined) {
-                return property;
-            }
-            switch (matchedFormat.type) {
-                case StringEncodedNumeral_1.StringEncodedNumeralType.Meters:
-                    return matchedFormat.decoder(property)[0];
-                case StringEncodedNumeral_1.StringEncodedNumeralType.Pixels:
-                    return matchedFormat.decoder(property)[0] * pixelToMeters;
-                case StringEncodedNumeral_1.StringEncodedNumeralType.Hex:
-                case StringEncodedNumeral_1.StringEncodedNumeralType.RGB:
-                case StringEncodedNumeral_1.StringEncodedNumeralType.HSL:
-                    const hslValues = matchedFormat.decoder(property);
-                    return tmpColor.setHSL(hslValues[0], hslValues[1], hslValues[2]).getHex();
-                default:
-                    return matchedFormat.decoder(property)[0];
-            }
+            const value = StringEncodedNumeral_1.parseStringEncodedNumeral(property, pixelToMeters);
+            return value !== undefined ? value : property;
         }
     }
     else if (property._stringEncodedNumeralType !== undefined) {
@@ -1991,6 +2047,7 @@ function getPropertyValue(property, level, pixelToMeters = 1.0) {
                 return getInterpolatedLength(property, level, pixelToMeters);
             case StringEncodedNumeral_1.StringEncodedNumeralType.Hex:
             case StringEncodedNumeral_1.StringEncodedNumeralType.RGB:
+            case StringEncodedNumeral_1.StringEncodedNumeralType.RGBA:
             case StringEncodedNumeral_1.StringEncodedNumeralType.HSL:
                 return getInterpolatedColor(property, level);
         }
@@ -2028,8 +2085,10 @@ function getInterpolatedColor(property, level) {
         interpolant.exponent = property.exponent;
     }
     interpolant.evaluate(level);
+    // Color.setRGB() does not clamp the values which may be out of
+    // color channels boundaries after interpolation.
     return tmpColor
-        .setHSL(interpolant.resultBuffer[0], interpolant.resultBuffer[1], interpolant.resultBuffer[2])
+        .setRGB(THREE.Math.clamp(interpolant.resultBuffer[0], 0, 1), THREE.Math.clamp(interpolant.resultBuffer[1], 0, 1), THREE.Math.clamp(interpolant.resultBuffer[2], 0, 1))
         .getHex();
 }
 /**
@@ -2082,9 +2141,14 @@ function createInterpolatedProperty(prop) {
 }
 exports.createInterpolatedProperty = createInterpolatedProperty;
 function removeDuplicatePropertyValues(p) {
+    const eps = 0.001;
+    // detect cubic interpolations and remove stops
+    // closer than `eps`, this is needed to avoid
+    // possible NaN generated by the cubic interpolator.
+    const isCubic = p.interpolation === "Cubic";
     for (let i = 0; i < p.values.length; ++i) {
-        const firstIdx = p.zoomLevels.findIndex((a) => {
-            return a === p.zoomLevels[i];
+        const firstIdx = p.zoomLevels.findIndex(a => {
+            return isCubic ? Math.abs(a - p.zoomLevels[i]) < eps : a === p.zoomLevels[i];
         });
         if (firstIdx !== i) {
             p.zoomLevels.splice(--i, 1);
@@ -2092,29 +2156,31 @@ function removeDuplicatePropertyValues(p) {
         }
     }
 }
-const colorFormats = [StringEncodedNumeral_1.StringEncodedHSL, StringEncodedNumeral_1.StringEncodedHex, StringEncodedNumeral_1.StringEncodedRGB];
-const worldSizeFormats = [StringEncodedNumeral_1.StringEncodedMeters, StringEncodedNumeral_1.StringEncodedPixels];
 function procesStringEnocodedNumeralInterpolatedProperty(baseFormat, prop, propValues, maskValues) {
     let needsMask = false;
     const allowedValueFormats = baseFormat.type === StringEncodedNumeral_1.StringEncodedNumeralType.Meters ||
         baseFormat.type === StringEncodedNumeral_1.StringEncodedNumeralType.Pixels
-        ? worldSizeFormats
-        : colorFormats;
+        ? StringEncodedNumeral_1.StringEncodedMetricFormats
+        : StringEncodedNumeral_1.StringEncodedColorFormats;
     for (let valueIdx = 0; valueIdx < prop.values.length; ++valueIdx) {
+        let matched = false;
         for (const valueFormat of allowedValueFormats) {
             const value = prop.values[valueIdx];
-            if (!valueFormat.regExp.test(value)) {
+            matched = valueFormat.decoder(value, tmpBuffer);
+            if (!matched) {
                 continue;
             }
             if (valueFormat.mask !== undefined) {
                 maskValues[valueIdx] = valueFormat.mask;
                 needsMask = true;
             }
-            const result = valueFormat.decoder(value);
-            for (let i = 0; i < result.length; ++i) {
-                propValues[valueIdx * valueFormat.size + i] = result[i];
+            for (let i = 0; i < valueFormat.size; ++i) {
+                propValues[valueIdx * valueFormat.size + i] = tmpBuffer[i];
             }
             break;
+        }
+        if (!matched) {
+            throw Error(`Not all interpolation values match the same format: ${JSON.stringify(prop)}`);
         }
     }
     return needsMask;
@@ -2281,9 +2347,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
  * Licensed under Apache 2.0, see full license in LICENSE
  * SPDX-License-Identifier: Apache-2.0
  */
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
 const three_1 = __webpack_require__(/*! three */ "three");
 const tmpColor = new three_1.Color();
-const tmpHSL = { h: 0, s: 0, l: 0 };
 /**
  * Enumeration of supported string encoded numerals.
  */
@@ -2293,72 +2359,206 @@ var StringEncodedNumeralType;
     StringEncodedNumeralType[StringEncodedNumeralType["Pixels"] = 1] = "Pixels";
     StringEncodedNumeralType[StringEncodedNumeralType["Hex"] = 2] = "Hex";
     StringEncodedNumeralType[StringEncodedNumeralType["RGB"] = 3] = "RGB";
-    StringEncodedNumeralType[StringEncodedNumeralType["HSL"] = 4] = "HSL";
+    StringEncodedNumeralType[StringEncodedNumeralType["RGBA"] = 4] = "RGBA";
+    StringEncodedNumeralType[StringEncodedNumeralType["HSL"] = 5] = "HSL";
 })(StringEncodedNumeralType = exports.StringEncodedNumeralType || (exports.StringEncodedNumeralType = {}));
-exports.StringEncodedMeters = {
+const StringEncodedMeters = {
     type: StringEncodedNumeralType.Meters,
     size: 1,
-    regExp: /((?=\.\d|\d)(?:\d+)?(?:\.?\d*))m/,
-    decoder: (encodedValue) => {
-        return [Number(exports.StringEncodedMeters.regExp.exec(encodedValue)[1])];
+    regExp: /^((?=\.\d|\d)(?:\d+)?(?:\.?\d*))m$/,
+    decoder: (encodedValue, target) => {
+        const match = StringEncodedMeters.regExp.exec(encodedValue);
+        return match ? (target[0] = Number(match[1])) !== undefined : false;
     }
 };
-exports.StringEncodedPixels = {
+const StringEncodedPixels = {
     type: StringEncodedNumeralType.Pixels,
     size: 1,
     mask: 1.0,
-    regExp: /((?=\.\d|\d)(?:\d+)?(?:\.?\d*))px/,
-    decoder: (encodedValue) => {
-        return [Number(exports.StringEncodedPixels.regExp.exec(encodedValue)[1])];
+    regExp: /^((?=\.\d|\d)(?:\d+)?(?:\.?\d*))px$/,
+    decoder: (encodedValue, target) => {
+        const match = StringEncodedPixels.regExp.exec(encodedValue);
+        if (match === null) {
+            return false;
+        }
+        target[0] = Number(match[1]);
+        return true;
     }
 };
-exports.StringEncodedHex = {
+const StringEncodedHex = {
     type: StringEncodedNumeralType.Hex,
     size: 3,
-    regExp: /#([0-9A-Fa-f]{1,2})([0-9A-Fa-f]{1,2})([0-9A-Fa-f]{1,2})/,
-    decoder: (encodedValue) => {
-        tmpColor.set(encodedValue).getHSL(tmpHSL);
-        return [tmpHSL.h, tmpHSL.s, tmpHSL.l];
+    regExp: /^\#((?:[0-9A-Fa-f][0-9A-Fa-f]){3,4}|[0-9A-Fa-f]{3,4})$/,
+    decoder: (encodedValue, target) => {
+        const match = StringEncodedHex.regExp.exec(encodedValue);
+        if (match === null) {
+            return false;
+        }
+        const hex = match[1];
+        const size = hex.length;
+        // Only few sizes are possible for given reg-exp.
+        harp_utils_1.assert(size === 3 || size === 4 || size === 6 || size === 8, `Matched incorrect hex format: ${encodedValue}`);
+        // Note that we simply ignore alpha channel value.
+        // TODO: To be resolved with HARP-7517
+        if (size === 3 || size === 4) {
+            // #RGB or #RGBA
+            target[0] = parseInt(hex.charAt(0) + hex.charAt(0), 16) / 255;
+            target[1] = parseInt(hex.charAt(1) + hex.charAt(1), 16) / 255;
+            target[2] = parseInt(hex.charAt(2) + hex.charAt(2), 16) / 255;
+        }
+        else if (size === 6 || size === 8) {
+            // #RRGGBB or #RRGGBBAA
+            target[0] = parseInt(hex.charAt(0) + hex.charAt(1), 16) / 255;
+            target[1] = parseInt(hex.charAt(2) + hex.charAt(3), 16) / 255;
+            target[2] = parseInt(hex.charAt(4) + hex.charAt(5), 16) / 255;
+        }
+        return true;
     }
 };
-exports.StringEncodedRGB = {
+const StringEncodedRGB = {
     type: StringEncodedNumeralType.RGB,
     size: 3,
     // tslint:disable-next-line:max-line-length
-    regExp: /rgb\((?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]))\)/,
-    decoder: (encodedValue) => {
-        const channels = exports.StringEncodedRGB.regExp.exec(encodedValue);
-        tmpColor
-            .setRGB(parseInt(channels[1], 10) / 255, parseInt(channels[2], 10) / 255, parseInt(channels[3], 10) / 255)
-            .getHSL(tmpHSL);
-        return [tmpHSL.h, tmpHSL.s, tmpHSL.l];
+    regExp: /^rgb\( ?(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5])) ?\)$/,
+    decoder: (encodedValue, target) => {
+        const channels = StringEncodedRGB.regExp.exec(encodedValue);
+        if (channels === null) {
+            return false;
+        }
+        target[0] = parseInt(channels[1], 10) / 255;
+        target[1] = parseInt(channels[2], 10) / 255;
+        target[2] = parseInt(channels[3], 10) / 255;
+        return true;
     }
 };
-exports.StringEncodedHSL = {
+const StringEncodedRGBA = {
+    type: StringEncodedNumeralType.RGBA,
+    size: 3,
+    // tslint:disable-next-line:max-line-length
+    regExp: /^rgba\( ?(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:(0(?:\.[0-9]+)?|1(?:\.0+)?)) ?\)$/,
+    decoder: (encodedValue, target) => {
+        const channels = StringEncodedRGBA.regExp.exec(encodedValue);
+        if (channels === null) {
+            return false;
+        }
+        // For now we simply ignore alpha channel value.
+        // TODO: To be resolved with HARP-7517
+        target[0] = parseInt(channels[1], 10) / 255;
+        target[1] = parseInt(channels[2], 10) / 255;
+        target[2] = parseInt(channels[3], 10) / 255;
+        return true;
+    }
+};
+const StringEncodedHSL = {
     type: StringEncodedNumeralType.HSL,
     size: 3,
     // tslint:disable-next-line:max-line-length
-    regExp: /hsl\(((?:[0-9]|[1-9][0-9]|1[0-9]{1,2}|2[0-9]{1,2}|3[0-5][0-9]|360)), ?(?:([0-9]|[1-9][0-9]|100)%), ?(?:([0-9]|[1-9][0-9]|100)%)\)/,
-    decoder: (encodedValue) => {
-        const channels = exports.StringEncodedHSL.regExp.exec(encodedValue);
-        return [
-            parseInt(channels[1], 10) / 360,
-            parseInt(channels[2], 10) / 100,
-            parseInt(channels[3], 10) / 100
-        ];
+    regExp: /^hsl\( ?((?:[0-9]|[1-9][0-9]|1[0-9]{1,2}|2[0-9]{1,2}|3[0-5][0-9]|360)), ?(?:([0-9]|[1-9][0-9]|100)%), ?(?:([0-9]|[1-9][0-9]|100)%) ?\)$/,
+    decoder: (encodedValue, target) => {
+        const channels = StringEncodedHSL.regExp.exec(encodedValue);
+        if (channels === null) {
+            return false;
+        }
+        tmpColor.setHSL(parseInt(channels[1], 10) / 360, parseInt(channels[2], 10) / 100, parseInt(channels[3], 10) / 100);
+        target[0] = tmpColor.r;
+        target[1] = tmpColor.g;
+        target[2] = tmpColor.b;
+        return true;
     }
 };
 /**
- * Array of supported [[StringEncodedNumeralFormat]]s (inteded to be indexed with
+ * Array of all supported [[StringEncodedNumeralFormat]]s describing sizes, lengths and distances.
+ */
+exports.StringEncodedMetricFormats = [
+    StringEncodedMeters,
+    StringEncodedPixels
+];
+const StringEncodedMetricFormatMaxSize = exports.StringEncodedMetricFormats.reduce((a, b) => Math.max(a, b.size), 0);
+/**
+ * Array of all supported [[StringEncodedNumeralFormat]]s describing color data.
+ */
+exports.StringEncodedColorFormats = [
+    StringEncodedHex,
+    StringEncodedRGB,
+    StringEncodedRGBA,
+    StringEncodedHSL
+];
+const StringEncodedColorFormatMaxSize = exports.StringEncodedColorFormats.reduce((a, b) => Math.max(a, b.size), 0);
+/**
+ * Array of supported [[StringEncodedNumeralFormat]]s (intended to be indexed with
  * [[StringEncodedNumeralType]] enum).
  */
 exports.StringEncodedNumeralFormats = [
-    exports.StringEncodedMeters,
-    exports.StringEncodedPixels,
-    exports.StringEncodedHex,
-    exports.StringEncodedRGB,
-    exports.StringEncodedHSL
+    ...exports.StringEncodedMetricFormats,
+    ...exports.StringEncodedColorFormats
 ];
+exports.StringEncodedNumeralFormatMaxSize = Math.max(StringEncodedColorFormatMaxSize, StringEncodedMetricFormatMaxSize);
+const tmpBuffer = new Array(exports.StringEncodedNumeralFormatMaxSize);
+/**
+ * Parse string encoded numeral values using all known [[StringEncodedNumeralFormats]].
+ *
+ * @param numeral The string representing numeric value.
+ * @param pixelToMeters The ratio used to convert from meters to pixels (default 1.0).
+ * @returns Number parsed or __undefined__ if non of the numeral patterns matches the expression
+ * provided in [[numeral]].
+ */
+function parseStringEncodedNumeral(numeral, pixelToMeters = 1.0) {
+    let result;
+    const formatMatch = (format) => {
+        if (format.decoder(numeral, tmpBuffer)) {
+            switch (format.type) {
+                case StringEncodedNumeralType.Meters:
+                    result = tmpBuffer[0];
+                    break;
+                case StringEncodedNumeralType.Pixels:
+                    result = tmpBuffer[0] * pixelToMeters;
+                    break;
+                case StringEncodedNumeralType.Hex:
+                case StringEncodedNumeralType.RGB:
+                case StringEncodedNumeralType.RGBA:
+                case StringEncodedNumeralType.HSL:
+                    result = tmpColor.setRGB(tmpBuffer[0], tmpBuffer[1], tmpBuffer[2]).getHex();
+                    break;
+                default:
+                    result = tmpBuffer[0];
+                    break;
+            }
+            return true;
+        }
+        return false;
+    };
+    exports.StringEncodedNumeralFormats.some(formatMatch);
+    return result;
+}
+exports.parseStringEncodedNumeral = parseStringEncodedNumeral;
+/**
+ * Parse string encoded color value using all known [[StringEncodedColorFormats]].
+ *
+ * @param color The string encoded color expression (i.e. '#FFF', 'rgb(255, 0, 0)', etc.).
+ * @returns The color parsed or __undefined__ if non of the known representations matches
+ * the expression provided in [[color]].
+ */
+function parseStringEncodedColor(color) {
+    const matchedFormat = matchFormat(exports.StringEncodedColorFormats, color, tmpBuffer);
+    if (matchedFormat === undefined) {
+        return undefined;
+    }
+    switch (matchedFormat.type) {
+        case StringEncodedNumeralType.Hex:
+        case StringEncodedNumeralType.RGB:
+        case StringEncodedNumeralType.RGBA:
+        case StringEncodedNumeralType.HSL:
+            return tmpColor.setRGB(tmpBuffer[0], tmpBuffer[1], tmpBuffer[2]).getHex();
+        default:
+            return tmpBuffer[0];
+    }
+}
+exports.parseStringEncodedColor = parseStringEncodedColor;
+function matchFormat(formats, numeral, result) {
+    return formats.find(format => {
+        return format.decoder(numeral, result) ? true : false;
+    });
+}
 
 
 /***/ }),
@@ -2389,7 +2589,7 @@ const Theme_1 = __webpack_require__(/*! ./Theme */ "../harp-datasource-protocol/
 const logger = harp_utils_1.LoggerManager.instance.create("StyleSetEvaluator");
 const emptyTechniqueDescriptor = TechniqueDescriptor_1.mergeTechniqueDescriptor({});
 /**
- * [[ExprClassifier]] searches for usages of `$layer` in `when` conditions
+ * [[StyleConditionClassifier]] searches for usages of `$layer` in `when` conditions
  * associated with styling rules.
  *
  * @hidden
@@ -2578,7 +2778,6 @@ class StyleSetEvaluator {
      */
     getMatchingTechniques(env, layer, geometryType) {
         const result = [];
-        const styleStack = new Array();
         this.m_cachedResults.clear();
         const optimizedSubSetKey = this.m_tmpOptimizedSubSetKey;
         optimizedSubSetKey.set(layer, geometryType, env);
@@ -2590,12 +2789,7 @@ class StyleSetEvaluator {
         const previousLayer = this.changeLayer(typeof currentLayer === "string" ? currentLayer : undefined);
         const previousGeometryType = this.changeGeometryType(typeof currentGeometryType === "string" ? currentGeometryType : undefined);
         for (const currStyle of searchedStyleSet) {
-            if (styleStack.length !== 0) {
-                this.changeLayer(previousLayer); // restore the layer
-                this.changeGeometryType(previousGeometryType); // restore the geometryType
-                throw new Error("Internal error: style stack cleanup failed");
-            }
-            if (this.processStyle(env, styleStack, currStyle, result)) {
+            if (this.processStyle(env, currStyle, result)) {
                 break;
             }
         }
@@ -2712,9 +2906,6 @@ class StyleSetEvaluator {
                 logger.log("failed to evaluate expression", JSON.stringify(style.when), "error", String(err));
             }
         }
-        if (Array.isArray(style.styles)) {
-            style.styles.forEach(nestedStyle => this.compileStyle(nestedStyle));
-        }
     }
     /**
      * Process a style (and its sub-styles) hierarchically to look for the technique that fits the
@@ -2723,14 +2914,13 @@ class StyleSetEvaluator {
      *
      * @param env The objects environment, i.e. the attributes that are relevant for its
      *            representation.
-     * @param styleStack Stack of styles containing the hierarchy of styles up to this point.
      * @param style Current style (could also be top of stack).
      * @param result The array of resulting techniques. There may be more than one technique per
      *               object, resulting in multiple graphical objects for representation.
      * @returns `true` if style has been found and processing is finished. `false` if not found, or
      *          more than one technique should be applied.
      */
-    processStyle(env, styleStack, style, result) {
+    processStyle(env, style, result) {
         if (this.m_layer !== undefined &&
             style.layer !== undefined &&
             style.layer !== this.m_layer) {
@@ -2755,29 +2945,18 @@ class StyleSetEvaluator {
                 return false;
             }
         }
-        if (style.styles !== undefined) {
-            styleStack.push(style);
-            for (const currStyle of style.styles) {
-                if (this.processStyle(env, styleStack, currStyle, result)) {
-                    styleStack.pop();
-                    return true;
-                }
-            }
-            styleStack.pop();
-            return false;
-        }
         if (style.technique === undefined) {
             return false;
         }
         // we found a technique!
         if (style.technique !== "none") {
-            result.push(this.getTechniqueForStyleMatch(env, styleStack, style));
+            result.push(this.getTechniqueForStyleMatch(env, style));
         }
         // stop processing if "final" is set
         return style.final === true;
     }
-    getTechniqueForStyleMatch(env, styleStack, style) {
-        this.checkStyleDynamicAttributes(style, styleStack);
+    getTechniqueForStyleMatch(env, style) {
+        this.checkStyleDynamicAttributes(style);
         if (style._dynamicTechniques !== undefined) {
             const dynamicAttributes = this.evaluateTechniqueProperties(style, env);
             const key = this.getDynamicTechniqueKey(style, dynamicAttributes);
@@ -2809,7 +2988,7 @@ class StyleSetEvaluator {
             .join(":");
         return `${style._styleSetIndex}:${dynamicAttrKey}`;
     }
-    checkStyleDynamicAttributes(style, styleStack) {
+    checkStyleDynamicAttributes(style) {
         if (style._dynamicTechniqueAttributes !== undefined || style.technique === "none") {
             return;
         }
@@ -2861,27 +3040,20 @@ class StyleSetEvaluator {
                 targetStaticAttributes.push([attrName, attrValue]);
             }
         };
-        function processAttributes(style2) {
-            processAttribute("renderOrder", style2.renderOrder);
-            processAttribute("renderOrderOffset", style2.renderOrderOffset);
-            // TODO: What the heck is that !?
-            processAttribute("label", style2.labelProperty);
-            // line & solid-line secondaryRenderOrder should be generic attr
-            // TODO: maybe just warn and force move it to `attr` ?
-            processAttribute("secondaryRenderOrder", style2.secondaryRenderOrder);
-            if (style2.attr !== undefined) {
-                for (const attrName in style2.attr) {
-                    if (!style2.attr.hasOwnProperty(attrName)) {
-                        continue;
-                    }
-                    processAttribute(attrName, style2.attr[attrName]);
+        processAttribute("renderOrder", style.renderOrder);
+        // TODO: What the heck is that !?
+        processAttribute("label", style.labelProperty);
+        // line & solid-line secondaryRenderOrder should be generic attr
+        // TODO: maybe just warn and force move it to `attr` ?
+        processAttribute("secondaryRenderOrder", style.secondaryRenderOrder);
+        if (style.attr !== undefined) {
+            for (const attrName in style.attr) {
+                if (!style.attr.hasOwnProperty(attrName)) {
+                    continue;
                 }
+                processAttribute(attrName, style.attr[attrName]);
             }
         }
-        for (const parentStyle of styleStack) {
-            processAttributes(parentStyle);
-        }
-        processAttributes(style);
         if (dynamicTechniqueAttributes.length > 0) {
             style._dynamicTechniques = new Map();
         }
@@ -2939,54 +3111,12 @@ class StyleSetEvaluator {
 }
 exports.StyleSetEvaluator = StyleSetEvaluator;
 function computeDefaultRenderOrder(styleSet) {
-    const options = {
-        techniqueRenderOrder: 0,
-        styleSetIndex: 0,
-        renderOrderBiasGroups: new Map()
-    };
+    let techniqueRenderOrder = 0;
+    let styleSetIndex = 0;
     for (const style of styleSet) {
-        computeStyleDefaultRenderOrder(style, options);
-    }
-}
-function computeStyleDefaultRenderOrder(style, state) {
-    if (style.renderOrderBiasGroup !== undefined) {
-        const renderOrderBiasGroupOrder = style.renderOrderBiasGroup
-            ? state.renderOrderBiasGroups.get(style.renderOrderBiasGroup)
-            : undefined;
-        if (style.renderOrderBiasRange !== undefined && renderOrderBiasGroupOrder === undefined) {
-            if (style.renderOrder !== undefined) {
-                logger.warn("WARN: style.renderOrder will be overridden if " +
-                    "renderOrderBiasGroup is set:", style);
-            }
-            const [minRange, maxRange] = style.renderOrderBiasRange;
-            style.renderOrder =
-                minRange < 0
-                    ? state.techniqueRenderOrder + Math.abs(minRange)
-                    : state.techniqueRenderOrder;
-            state.techniqueRenderOrder += Math.abs(minRange) + maxRange;
-            if (style.renderOrderBiasGroup) {
-                state.renderOrderBiasGroups.set(style.renderOrderBiasGroup, style.renderOrder);
-            }
-            state.techniqueRenderOrder++;
-        }
-        else if (renderOrderBiasGroupOrder) {
-            if (style.renderOrder !== undefined) {
-                logger.warn("WARN: style.renderOrder will be overridden if " +
-                    "renderOrderBiasGroup is set:", style);
-            }
-            style.renderOrder = renderOrderBiasGroupOrder;
-        }
-    }
-    // search through child styles
-    if (style.styles !== undefined) {
-        for (const currStyle of style.styles) {
-            computeStyleDefaultRenderOrder(currStyle, state);
-        }
-    }
-    else {
-        style._styleSetIndex = state.styleSetIndex++;
+        style._styleSetIndex = styleSetIndex++;
         if (style.technique !== undefined && style.renderOrder === undefined) {
-            style.renderOrder = state.techniqueRenderOrder++;
+            style.renderOrder = techniqueRenderOrder++;
         }
     }
 }
@@ -3010,11 +3140,7 @@ function resolveStyleReferences(style, definitions) {
         // instantiate the style
         return resolveStyleReferences(def, definitions);
     }
-    const styles = style.styles &&
-        style.styles
-            .map(subStyle => resolveStyleReferences(subStyle, definitions))
-            .filter(subStyle => subStyle !== undefined);
-    return Object.assign(Object.assign({}, style), { styles });
+    return Object.assign({}, style);
 }
 /**
  * Create transferable representation of dynamic technique.
@@ -3463,22 +3589,14 @@ exports.solidLineTechniqueDescriptor = TechniqueDescriptor_1.mergeTechniqueDescr
         transparent: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
         lineWidth: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
         secondaryWidth: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
-        secondaryColor: TechniqueDescriptor_1.AttrScope.TechniqueRendering
-    }
-});
-exports.techniqueDescriptors["solid-line"] = exports.solidLineTechniqueDescriptor;
-exports.dashedLineTechniqueDescriptor = TechniqueDescriptor_1.mergeTechniqueDescriptor(exports.baseTechniqueParamsDescriptor, polygonalTechniqueDescriptor, {
-    attrScopes: {
-        color: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
-        clipping: TechniqueDescriptor_1.AttrScope.TechniqueGeometry,
-        opacity: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
-        transparent: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
-        lineWidth: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
+        secondaryColor: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
         dashSize: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
         gapSize: TechniqueDescriptor_1.AttrScope.TechniqueRendering
     }
 });
-exports.techniqueDescriptors["dashed-line"] = exports.dashedLineTechniqueDescriptor;
+exports.techniqueDescriptors["solid-line"] = exports.solidLineTechniqueDescriptor;
+// TODO: Remove deprecated "dashed-line" support in future releases.
+exports.techniqueDescriptors["dashed-line"] = exports.solidLineTechniqueDescriptor;
 exports.lineTechniqueDescriptor = TechniqueDescriptor_1.mergeTechniqueDescriptor(exports.baseTechniqueParamsDescriptor, {
     attrScopes: {
         // TODO, check, which are really dynamic !
@@ -3629,13 +3747,6 @@ function isLineMarkerTechnique(technique) {
 }
 exports.isLineMarkerTechnique = isLineMarkerTechnique;
 /**
- * Type guard to check if an object is an instance of [[DashedLineTechnique]].
- */
-function isDashedLineTechnique(technique) {
-    return technique.name === "dashed-line";
-}
-exports.isDashedLineTechnique = isDashedLineTechnique;
-/**
  * Type guard to check if an object is an instance of [[LineTechnique]].
  */
 function isLineTechnique(technique) {
@@ -3646,7 +3757,7 @@ exports.isLineTechnique = isLineTechnique;
  * Type guard to check if an object is an instance of [[SolidLineTechnique]].
  */
 function isSolidLineTechnique(technique) {
-    return technique.name === "solid-line";
+    return technique.name === "solid-line" || technique.name === "dashed-line";
 }
 exports.isSolidLineTechnique = isSolidLineTechnique;
 /**
@@ -3890,13 +4001,6 @@ class ThemeVisitor {
             if (visitFunc(style)) {
                 return true;
             }
-            if (style.styles !== undefined) {
-                for (const currStyle of style.styles) {
-                    if (visit(currStyle)) {
-                        return true;
-                    }
-                }
-            }
             return false;
         };
         if (this.theme.styles !== undefined) {
@@ -3992,12 +4096,26 @@ var ThreeBufferUtils;
             vertexAttribute.name = name;
             vertexAttributes.push(vertexAttribute);
         }
-        const index = fromThreeBufferAttribute(bufferGeometry.index);
+        const index = bufferGeometry.index !== null
+            ? fromThreeBufferAttribute(bufferGeometry.index)
+            : undefined;
+        let count = 0;
+        if (index !== undefined) {
+            count = bufferGeometry.index.count;
+        }
+        else {
+            // If there is no index buffer, try to deduce the count from the position attribute.
+            const posAttr = bufferGeometry.attributes.position;
+            if (posAttr === undefined) {
+                throw new Error("Missing position attibute to deduce item count");
+            }
+            count = posAttr.count;
+        }
         return {
             type: DecodedTile_1.GeometryType.Unspecified,
             vertexAttributes,
             index,
-            groups: [{ start: 0, count: bufferGeometry.index.count, technique: techniqueIndex }]
+            groups: [{ start: 0, count, technique: techniqueIndex }]
         };
     }
     ThreeBufferUtils.fromThreeBufferGeometry = fromThreeBufferGeometry;
@@ -5113,16 +5231,38 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const THREE = __webpack_require__(/*! three */ "three");
 const tmpColor = new THREE.Color();
 const operators = {
+    rgba: {
+        call: (context, call) => {
+            const r = context.evaluate(call.args[0]);
+            const g = context.evaluate(call.args[1]);
+            const b = context.evaluate(call.args[2]);
+            const a = context.evaluate(call.args[3]);
+            if (typeof r === "number" &&
+                typeof g === "number" &&
+                typeof b === "number" &&
+                typeof a === "number" &&
+                r >= 0 &&
+                g >= 0 &&
+                b >= 0 &&
+                a >= 0 &&
+                a <= 1) {
+                return rgbaToString(r, g, b, a);
+            }
+            throw new Error(`unknown color 'rgba(${r},${g},${b},${a})'`);
+        }
+    },
     rgb: {
         call: (context, call) => {
             const r = context.evaluate(call.args[0]);
             const g = context.evaluate(call.args[1]);
             const b = context.evaluate(call.args[2]);
-            if (typeof r === "number" && typeof g === "number" && typeof b === "number") {
-                return ("#" +
-                    tmpColor
-                        .setRGB(THREE.Math.clamp(r, 0, 255) / 255, THREE.Math.clamp(g, 0, 255) / 255, THREE.Math.clamp(b, 0, 255) / 255)
-                        .getHexString());
+            if (typeof r === "number" &&
+                typeof g === "number" &&
+                typeof b === "number" &&
+                r >= 0 &&
+                g >= 0 &&
+                b >= 0) {
+                return rgbaToString(r, g, b);
             }
             throw new Error(`unknown color 'rgb(${r},${g},${b})'`);
         }
@@ -5138,12 +5278,23 @@ const operators = {
                 h >= 0 &&
                 s >= 0 &&
                 l >= 0) {
-                return `hsl(${h},${Math.round(s)}%,${Math.round(l)}%)`;
+                return hslToString(h, s, l);
             }
             throw new Error(`unknown color 'hsl(${h},${s}%,${l}%)'`);
         }
     }
 };
+function rgbaToString(r, g, b, a) {
+    // For now we simply ignore alpha component from rgba(...) expressions.
+    // TODO: To be resolved with HARP-7517.
+    return ("#" +
+        tmpColor
+            .setRGB(THREE.Math.clamp(r, 0, 255) / 255, THREE.Math.clamp(g, 0, 255) / 255, THREE.Math.clamp(b, 0, 255) / 255)
+            .getHexString());
+}
+function hslToString(h, s, l) {
+    return `hsl(${h},${Math.round(s)}%,${Math.round(l)}%)`;
+}
 exports.ColorOperators = operators;
 
 
@@ -5285,6 +5436,36 @@ function conditionalCast(context, type, args) {
     } // switch
 }
 const operators = {
+    all: {
+        call: (context, call) => {
+            for (const childExpr of call.args) {
+                if (!context.evaluate(childExpr)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    },
+    any: {
+        call: (context, call) => {
+            for (const childExpr of call.args) {
+                if (context.evaluate(childExpr)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    },
+    none: {
+        call: (context, call) => {
+            for (const childExpr of call.args) {
+                if (context.evaluate(childExpr)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    },
     boolean: {
         call: (context, call) => {
             return conditionalCast(context, "boolean", call.args);
@@ -5365,6 +5546,15 @@ function step(context, args) {
     return context.evaluate(args[index * 2 + 1]);
 }
 const operators = {
+    ppi: {
+        call: (context, call) => {
+            const ppi = context.env.lookup("$ppi");
+            if (typeof ppi === "number") {
+                return ppi;
+            }
+            return 72;
+        }
+    },
     zoom: {
         call: (context, call) => {
             if (context.scope === Expr_1.ExprScope.Condition) {
@@ -5437,6 +5627,9 @@ const operators = {
             if (result === undefined) {
                 throw new Error("failed to create interpolator");
             }
+            if (context.scope === Expr_1.ExprScope.Dynamic) {
+                return InterpolatedProperty_1.getPropertyValue(result, context.env);
+            }
             return result;
         }
     },
@@ -5446,7 +5639,7 @@ const operators = {
                 throw new Error("expected the input of the 'step' operator");
             }
             const input = call.args[0];
-            if (context.scope === Expr_1.ExprScope.Value &&
+            if ((context.scope === Expr_1.ExprScope.Value || context.scope === Expr_1.ExprScope.Dynamic) &&
                 input instanceof Expr_1.CallExpr &&
                 input.op === "zoom") {
                 if (call.args.length < 3 || call.args.length % 2) {
@@ -5475,6 +5668,9 @@ const operators = {
                 });
                 if (interpolation === undefined) {
                     throw new Error("failed to create interpolator");
+                }
+                if (context.scope === Expr_1.ExprScope.Dynamic) {
+                    return InterpolatedProperty_1.getPropertyValue(interpolation, context.env);
                 }
                 return interpolation;
             }
@@ -6013,6 +6209,7 @@ class DebugTile extends harp_mapview_1.Tile {
             });
         }
         const text = `${tileKey.mortonCode()} (${tileKey.row}, ${tileKey.column}, ${tileKey.level})`;
+        textPosition.add(this.center);
         const textElement = new harp_mapview_1.TextElement(text, textPosition, this.m_textRenderStyle, this.m_textLayoutStyle, PRIORITY_ALWAYS, TEXT_SCALE);
         textElement.mayOverlap = true;
         textElement.reserveSpace = false;
@@ -6188,6 +6385,8 @@ exports.MapViewMultiPointFeature = MapViewMultiPointFeature;
 Object.defineProperty(exports, "__esModule", { value: true });
 const harp_geojson_datasource_1 = __webpack_require__(/*! @here/harp-geojson-datasource */ "../harp-geojson-datasource/index.ts");
 const harp_omv_datasource_1 = __webpack_require__(/*! @here/harp-omv-datasource */ "../harp-omv-datasource/index.ts");
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
+const logger = harp_utils_1.LoggerManager.instance.create("FeaturesDataSource");
 const NAME = "user-features-datasource";
 const DEFAULT_GEOJSON = {
     type: "FeatureCollection",
@@ -6200,14 +6399,20 @@ class FeaturesDataSource extends harp_omv_datasource_1.OmvDataSource {
     /**
      * Builds a `FeaturesDataSource`.
      *
-     * @param workerTilerUrl Worker tiler URL. Defaults to `./decoder.bundle.ts` in the
-     * [[ConcurrentTilerFacade]].
+     * @param options specify custom options using [[FeatureDataSourceOptions]] interface.
      */
-    constructor(workerTilerUrl) {
-        super({
-            dataProvider: new harp_geojson_datasource_1.GeoJsonDataProvider(NAME, DEFAULT_GEOJSON, { workerTilerUrl })
-        });
+    constructor(options) {
+        super(Object.assign(Object.assign({}, options), { dataProvider: new harp_geojson_datasource_1.GeoJsonDataProvider(NAME, DEFAULT_GEOJSON, options) }));
+        this.m_isAttached = false;
         this.m_featureCollection = this.emptyGeojson();
+        if (options !== undefined) {
+            if (options.features !== undefined) {
+                this.add(...options.features);
+            }
+            if (options.geojson !== undefined) {
+                this.setFromGeojson(options.geojson);
+            }
+        }
     }
     /**
      * This method allows to directly add a GeoJSON without using [[MapViewFeature]] instances. It
@@ -6271,6 +6476,28 @@ class FeaturesDataSource extends harp_omv_datasource_1.OmvDataSource {
         this.m_featureCollection = this.emptyGeojson();
         this.update();
     }
+    async connect() {
+        await super.connect();
+        if (this.m_featureCollection.features.length > 0) {
+            await this.update();
+        }
+    }
+    /**
+     * Override [[DataSource.attach]] to know if we're really connected to [[MapView]].
+     * @param mapView
+     */
+    attach(mapView) {
+        super.attach(mapView);
+        this.m_isAttached = true;
+    }
+    /**
+     * Override [[DataSource.detach]] to know if we're really connected to [[MapView]].
+     * @param mapView
+     */
+    detach(mapView) {
+        super.detach(mapView);
+        this.m_isAttached = false;
+    }
     addFeature(feature) {
         // Check if the feature is not already in there.
         const hasFeature = this.m_featureCollection.features.some(_feature => _feature.properties.__mapViewUuid === feature.uuid);
@@ -6297,9 +6524,21 @@ class FeaturesDataSource extends harp_omv_datasource_1.OmvDataSource {
         }
         this.m_featureCollection.features.splice(index, 1);
     }
-    update() {
-        this.dataProvider().updateInput(this.m_featureCollection);
-        this.mapView.markTilesDirty(this);
+    async update() {
+        const dataProvider = this.dataProvider();
+        if (!this.m_isAttached || !dataProvider.ready()) {
+            return;
+        }
+        try {
+            await dataProvider.updateInput(this.m_featureCollection);
+            if (this.m_isAttached) {
+                this.mapView.markTilesDirty(this);
+            }
+        }
+        catch (error) {
+            // We use `update` in sync API, so there's no-one to react to errors so log them.
+            logger.error(`[${this.name}]: failed to update tile index`, error);
+        }
     }
     emptyGeojson() {
         return {
@@ -6566,12 +6805,13 @@ class GeoJsonTile extends harp_mapview_1.Tile {
      */
     createTextElements(decodedTile, zoomLevel) {
         const tileGeometryCreator = TileGeometryCreator_1.TileGeometryCreator.instance;
+        const worldOffsetX = this.computeWorldOffsetX();
         if (decodedTile.poiGeometries !== undefined) {
             for (const geometry of decodedTile.poiGeometries) {
                 const techniqueIndex = geometry.technique;
                 const technique = decodedTile.techniques[techniqueIndex];
                 if (harp_datasource_protocol_1.isPoiTechnique(technique)) {
-                    this.addPois(tileGeometryCreator, geometry, technique, zoomLevel);
+                    this.addPois(geometry, technique, zoomLevel, worldOffsetX);
                 }
             }
         }
@@ -6580,7 +6820,7 @@ class GeoJsonTile extends harp_mapview_1.Tile {
                 const techniqueIndex = geometry.technique;
                 const technique = decodedTile.techniques[techniqueIndex];
                 if (harp_datasource_protocol_1.isTextTechnique(technique)) {
-                    this.addTexts(tileGeometryCreator, geometry, technique);
+                    this.addTexts(geometry, technique, worldOffsetX);
                 }
             }
         }
@@ -6590,7 +6830,7 @@ class GeoJsonTile extends harp_mapview_1.Tile {
                 const techniqueIndex = textPath.technique;
                 const technique = decodedTile.techniques[techniqueIndex];
                 if (harp_datasource_protocol_1.isTextTechnique(technique)) {
-                    this.addTextPaths(tileGeometryCreator, textPath, technique);
+                    this.addTextPaths(textPath, technique, worldOffsetX);
                 }
             }
         }
@@ -6604,33 +6844,32 @@ class GeoJsonTile extends harp_mapview_1.Tile {
     /**
      * Calls `addTextPath` for each TextPath.
      *
-     * @param tileGeometryCreator [[TileGeometryCreator]] to help with the text path.
      * @param geometry The TextPath geometry.
      * @param technique Text technique.
      */
-    addTextPaths(tileGeometryCreator, geometry, technique) {
+    addTextPaths(geometry, technique, worldOffsetX) {
         const path = [];
         for (let i = 0; i < geometry.path.length; i += 3) {
-            path.push(new THREE.Vector3(geometry.path[i], geometry.path[i + 1], geometry.path[i + 2]));
+            path.push(new THREE.Vector3(geometry.path[i] + worldOffsetX, geometry.path[i + 1], geometry.path[i + 2]));
         }
         const properties = geometry.objInfos !== undefined ? geometry.objInfos : undefined;
-        this.addTextPath(tileGeometryCreator, path, geometry.text, technique, properties);
+        this.addTextPath(path, geometry.text, technique, properties);
     }
     /**
      * Add a label available for mouse picking at the given path.
      *
-     * @param tileGeometryCreator [[TileGeometryCreator]] to help with the text path.
      * @param path Path of the text path.
      * @param text Text of the path.
      * @param technique Technique in use.
      * @param geojsonProperties Properties defined by the user.
      */
-    addTextPath(tileGeometryCreator, path, text, technique, geojsonProperties) {
+    addTextPath(path, text, technique, geojsonProperties) {
         const priority = technique.priority === undefined ? DEFAULT_LABELED_ICON.priority : technique.priority;
         const xOffset = technique.xOffset === undefined ? DEFAULT_LABELED_ICON.xOffset : technique.xOffset;
         const yOffset = technique.yOffset === undefined ? DEFAULT_LABELED_ICON.yOffset : technique.yOffset;
         const featureId = DEFAULT_LABELED_ICON.featureId;
-        const textElement = new harp_mapview_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(text), path, tileGeometryCreator.getRenderStyle(this, technique), tileGeometryCreator.getLayoutStyle(this, technique), harp_datasource_protocol_1.getPropertyValue(priority, this.mapView.zoomLevel), xOffset, yOffset, featureId);
+        const styleCache = this.mapView.textElementsRenderer.styleCache;
+        const textElement = new harp_mapview_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(text), path, styleCache.getRenderStyle(this, technique), styleCache.getLayoutStyle(this, technique), harp_datasource_protocol_1.getPropertyValue(priority, this.mapView.zoomLevel), xOffset, yOffset, featureId);
         // Set the userData of the TextElement to the geojsonProperties, then it will be available
         // for picking.
         if (geojsonProperties !== undefined) {
@@ -6651,34 +6890,33 @@ class GeoJsonTile extends harp_mapview_1.Tile {
     /**
      * Calls `addText` on each vertex of the geometry.
      *
-     * @param tileGeometryCreator [[TileGeometryCreator]] to help with the text path.
      * @param geometry The Text geometry.
      * @param technique Text technique.
      */
-    addTexts(tileGeometryCreator, geometry, technique) {
+    addTexts(geometry, technique, worldOffsetX) {
         const attribute = harp_mapview_1.getBufferAttribute(geometry.positions);
         for (let index = 0; index < attribute.count; index++) {
-            const currentVertexCache = new THREE.Vector3(attribute.getX(index), attribute.getY(index), attribute.getZ(index));
+            const currentVertexCache = new THREE.Vector3(attribute.getX(index) + worldOffsetX, attribute.getY(index), attribute.getZ(index));
             const properties = geometry.objInfos !== undefined ? geometry.objInfos[index] : undefined;
             const text = geometry.stringCatalog[index];
-            this.addText(tileGeometryCreator, currentVertexCache, text, technique, properties);
+            this.addText(currentVertexCache, text, technique, properties);
         }
     }
     /**
      * Add a label available for mouse picking at the given position.
      *
-     * @param tileGeometryCreator [[TileGeometryCreator]] to help with the text path.
      * @param position position of the labeled Icon, in world coordinate.
      * @param text Text of the path.
      * @param technique Technique in use.
      * @param geojsonProperties Properties defined by the user.
      */
-    addText(tileGeometryCreator, position, text, technique, geojsonProperties) {
+    addText(position, text, technique, geojsonProperties) {
         const priority = technique.priority === undefined ? DEFAULT_LABELED_ICON.priority : technique.priority;
         const xOffset = technique.xOffset === undefined ? DEFAULT_LABELED_ICON.xOffset : technique.xOffset;
         const yOffset = technique.yOffset === undefined ? DEFAULT_LABELED_ICON.yOffset : technique.yOffset;
         const featureId = DEFAULT_LABELED_ICON.featureId;
-        const textElement = new harp_mapview_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(text), position, tileGeometryCreator.getRenderStyle(this, technique), tileGeometryCreator.getLayoutStyle(this, technique), harp_datasource_protocol_1.getPropertyValue(priority, this.mapView.zoomLevel), xOffset, yOffset, featureId);
+        const styleCache = this.mapView.textElementsRenderer.styleCache;
+        const textElement = new harp_mapview_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(text), position, styleCache.getRenderStyle(this, technique), styleCache.getLayoutStyle(this, technique), harp_datasource_protocol_1.getPropertyValue(priority, this.mapView.zoomLevel), xOffset, yOffset, featureId);
         // Set the userData of the TextElement to the geojsonProperties, then it will be available
         // for picking.
         if (geojsonProperties !== undefined) {
@@ -6696,34 +6934,33 @@ class GeoJsonTile extends harp_mapview_1.Tile {
     /**
      * Calls `addPoi` on each vertex of the geometry.
      *
-     * @param tileGeometryCreator [[TileGeometryCreator]] to help with the text path.
      * @param geometry The POI geometry.
      * @param technique POI technique.
      */
-    addPois(tileGeometryCreator, geometry, technique, zoomLevel) {
+    addPois(geometry, technique, zoomLevel, worldOffsetX) {
         const attribute = harp_mapview_1.getBufferAttribute(geometry.positions);
         const currentVertexCache = new THREE.Vector3();
         for (let index = 0; index < attribute.count; index++) {
-            currentVertexCache.set(attribute.getX(index), attribute.getY(index), attribute.getZ(index));
+            currentVertexCache.set(attribute.getX(index) + worldOffsetX, attribute.getY(index), attribute.getZ(index));
             const properties = geometry.objInfos !== undefined ? geometry.objInfos[index] : undefined;
-            this.addPoi(tileGeometryCreator, currentVertexCache, technique, zoomLevel, properties);
+            this.addPoi(currentVertexCache, technique, zoomLevel, properties);
         }
     }
     /**
      * Add a POI available for mouse picking at the given position.
      *
-     * @param tileGeometryCreator [[TileGeometryCreator]] to help with the text path.
      * @param position position of the labeled Icon, in world coordinate.
      * @param technique Technique in use.
      * @param geojsonProperties Properties defined by the user.
      */
-    addPoi(tileGeometryCreator, position, technique, zoomLevel, geojsonProperties) {
+    addPoi(position, technique, zoomLevel, geojsonProperties) {
         const label = DEFAULT_LABELED_ICON.label;
         const priority = technique.priority === undefined ? DEFAULT_LABELED_ICON.priority : technique.priority;
         const xOffset = harp_datasource_protocol_1.getPropertyValue(technique.xOffset, zoomLevel);
         const yOffset = harp_datasource_protocol_1.getPropertyValue(technique.yOffset, zoomLevel);
         const featureId = DEFAULT_LABELED_ICON.featureId;
-        const textElement = new harp_mapview_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(label), position, tileGeometryCreator.getRenderStyle(this, technique), tileGeometryCreator.getLayoutStyle(this, technique), harp_datasource_protocol_1.getPropertyValue(priority, this.mapView.zoomLevel), xOffset === undefined ? DEFAULT_LABELED_ICON.xOffset : xOffset, yOffset === undefined ? DEFAULT_LABELED_ICON.yOffset : yOffset, featureId);
+        const styleCache = this.mapView.textElementsRenderer.styleCache;
+        const textElement = new harp_mapview_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(label), position, styleCache.getRenderStyle(this, technique), styleCache.getLayoutStyle(this, technique), harp_datasource_protocol_1.getPropertyValue(priority, this.mapView.zoomLevel), xOffset === undefined ? DEFAULT_LABELED_ICON.xOffset : xOffset, yOffset === undefined ? DEFAULT_LABELED_ICON.yOffset : yOffset, featureId);
         // Set the userData of the TextElement to the geojsonProperties, then it will be available
         // for picking.
         if (geojsonProperties !== undefined) {
@@ -10782,8 +11019,8 @@ var HighPrecisionUtils;
      */
     function setPositions(object, positions) {
         const attributes = createAttributes(positions);
-        object.bufferGeometry.addAttribute("position", attributes.positionHigh);
-        object.bufferGeometry.addAttribute("positionLow", attributes.positionLow);
+        object.bufferGeometry.setAttribute("position", attributes.positionHigh);
+        object.bufferGeometry.setAttribute("positionLow", attributes.positionLow);
         return attributes.positionHigh.itemSize;
     }
     HighPrecisionUtils.setPositions = setPositions;
@@ -10829,8 +11066,8 @@ var HighPrecisionUtils;
         const buffer = new three_1.InterleavedBuffer(new Float32Array(hpPositions), 6);
         const positionAttribute = new three_1.InterleavedBufferAttribute(buffer, 3, 0, false);
         const positionLowAttribute = new three_1.InterleavedBufferAttribute(buffer, 3, 3, false);
-        hpLineGeometry.addAttribute("position", positionAttribute);
-        hpLineGeometry.addAttribute("positionLow", positionLowAttribute);
+        hpLineGeometry.setAttribute("position", positionAttribute);
+        hpLineGeometry.setAttribute("positionLow", positionLowAttribute);
         hpLineGeometry.setIndex(new three_1.BufferAttribute(new Uint32Array(indices), 1));
         const hpSolidMaterial = new harp_materials_1.HighPrecisionLineMaterial(params);
         const lineObject = wireFrame
@@ -10895,25 +11132,27 @@ const SEGMENT_OFFSET = 0.1;
 /**
  * Declares all the vertex attributes used for rendering a line using the [[SolidLineMaterial]].
  */
-/** Optional normal and uv coordinates. */
-const NORMAL_UV_VERTEX_ATTRIBUTES = {
-    attributes: [
-        { name: "uv", itemSize: 2, offset: 13 },
-        { name: "normal", itemSize: 3, offset: 15 }
-    ],
-    stride: 5
-};
 /** Base line vertex attributes. */
 const LINE_VERTEX_ATTRIBUTES = {
-    // The "extrusionCoord" its a vec3. Represents UV coordinates + line length for the third
-    // component.
     attributes: [
+        // The "extrusionCoord" is a vec4 which represents:
+        // xy: Extrusion coordinates
+        // sign(xy): Extrusion direction
+        // z: Line length
         { name: "extrusionCoord", itemSize: 3, offset: 0 },
         { name: "position", itemSize: 3, offset: 3 },
         { name: "tangent", itemSize: 3, offset: 6 },
         { name: "bitangent", itemSize: 4, offset: 9 }
     ],
     stride: 13
+};
+/** Optional normal and uv coordinates. */
+const NORMAL_UV_VERTEX_ATTRIBUTES = {
+    attributes: [
+        { name: "uv", itemSize: 2, offset: LINE_VERTEX_ATTRIBUTES.stride },
+        { name: "normal", itemSize: 3, offset: LINE_VERTEX_ATTRIBUTES.stride + 2 }
+    ],
+    stride: 5
 };
 /** Base line vertex attributes plus normals and uv coordinates. */
 const LINE_VERTEX_ATTRIBUTES_NUV = {
@@ -10966,12 +11205,13 @@ function getVertexDescriptor(hasNormalsAndUvs, highPrecision) {
  *
  * @param center Center of the polyline.
  * @param polyline Array of `numbers` describing a polyline.
+ * @param offsets Array of `numbers` representing line segment offsets.
  * @param uvs Array of `numbers` representing texture coordinates.
  * @param colors Array of `numbers` describing a polyline's colors.
  * @param geometry [[LineGeometry]] object used to store the vertex and index attributes.
  * @param highPrecision If `true` will create high-precision vertex information.
  */
-function createLineGeometry(center, polyline, uvs, colors, geometry = new LineGeometry(), highPrecision = false) {
+function createLineGeometry(center, polyline, offsets, uvs, colors, geometry = new LineGeometry(), highPrecision = false) {
     if (polyline.length === 0) {
         return geometry;
     }
@@ -10980,8 +11220,10 @@ function createLineGeometry(center, polyline, uvs, colors, geometry = new LineGe
     const segments = new Array(pointCount);
     const tangents = new Array(polyline.length - 3);
     const baseVertex = geometry.vertices.length / stride;
+    const hasSegmentOffsets = offsets !== undefined && offsets.length > 0;
     const hasTexCoords = uvs !== undefined && uvs.length > 0;
     const vertexColors = colors !== undefined && colors.length && polyline.length;
+    harp_utils_1.assert(!hasSegmentOffsets || offsets.length === pointCount);
     harp_utils_1.assert(!hasTexCoords || uvs.length / 2 === pointCount);
     harp_utils_1.assert(!vertexColors || colors.length === polyline.length);
     // Compute segments and tangents.
@@ -11000,7 +11242,16 @@ function createLineGeometry(center, polyline, uvs, colors, geometry = new LineGe
         sum = sum + len;
         segments[i + 1] = sum;
     }
-    const lineLength = segments[segments.length - 1];
+    const lineCoverage = hasSegmentOffsets
+        ? Math.abs(offsets[offsets.length - 1] - offsets[0])
+        : 1.0;
+    const lineLength = segments[segments.length - 1] / lineCoverage;
+    // Override the segments if offsets are explicitly provided.
+    if (hasSegmentOffsets) {
+        for (let i = 0; i < pointCount; ++i) {
+            segments[i] = offsets[i] * lineLength + SEGMENT_OFFSET;
+        }
+    }
     // Check if we're working with a closed line.
     let isClosed = true;
     for (let j = 0; j < 3; ++j) {
@@ -11127,9 +11378,9 @@ class LineGroup {
      */
     static createGeometry(vertices, colors, indices, geometry, hasNormalsAndUvs = false, highPrecision = false, isSimple = false) {
         if (isSimple) {
-            geometry.addAttribute("position", new THREE.BufferAttribute(new Float32Array(vertices), 3));
+            geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(vertices), 3));
             if (colors.length === vertices.length) {
-                geometry.addAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
+                geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
             }
             geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
             return geometry;
@@ -11139,10 +11390,10 @@ class LineGroup {
             const buffer = new THREE.InterleavedBuffer(new Float32Array(vertices), vertexDescriptor.stride);
             vertexDescriptor.attributes.forEach(descr => {
                 const attribute = new THREE.InterleavedBufferAttribute(buffer, descr.itemSize, descr.offset, false);
-                geometry.addAttribute(descr.name, attribute);
+                geometry.setAttribute(descr.name, attribute);
             });
             if (colors.length === vertices.length) {
-                geometry.addAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
+                geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
             }
             geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
             return geometry;
@@ -11161,13 +11412,14 @@ class LineGroup {
      *
      * @param center World center of the provided points.
      * @param points Sequence of (x,y,z) coordinates.
+     * @param offsets Sequence of line segment offsets.
      * @param uvs Sequence of (u,v) texture coordinates.
      * @param colors Sequence of (r,g,b) color components.
      */
-    add(center, points, uvs, colors) {
+    add(center, points, offsets, uvs, colors) {
         if (!this.isSimple) {
             harp_utils_1.assert(!this.hasNormalsAndUvs || uvs !== undefined);
-            createLineGeometry(center, points, uvs, colors, this.m_geometry, this.highPrecision);
+            createLineGeometry(center, points, offsets, uvs, colors, this.m_geometry, this.highPrecision);
         }
         else {
             createSimpleLineGeometry(points, colors, this.m_geometry);
@@ -12919,6 +13171,7 @@ exports.MapControls = MapControls;
  * SPDX-License-Identifier: Apache-2.0
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+const harp_geoutils_1 = __webpack_require__(/*! @here/harp-geoutils */ "../harp-geoutils/index.ts");
 const harp_mapview_1 = __webpack_require__(/*! @here/harp-mapview */ "../harp-mapview/index.ts");
 const THREE = __webpack_require__(/*! three */ "three");
 /**
@@ -12936,10 +13189,15 @@ class MapControlsUI {
          * The DOM node containing the UI.
          */
         this.domElement = document.createElement("div");
+        this.m_buttonsElement = document.createElement("div");
         /**
          * Displays zoom level if [[MapControlsUIOptions.zoomLevel]] is defined.
          */
         this.m_zoomLevelElement = null;
+        /**
+         * Displays zoom level if [[MapControlsUIOptions.projectionSwitch]] is defined.
+         */
+        this.m_projectionSwitchElement = null;
         this.m_onMapViewRenderEvent = () => {
             if (this.m_zoomLevelElement === null) {
                 return;
@@ -12957,34 +13215,52 @@ class MapControlsUI {
             if (!event ||
                 !event.target ||
                 !event.target.contains ||
-                (event.target === input || event.target.contains(input))) {
+                event.target === input ||
+                event.target.contains(input)) {
                 return;
             }
             input.blur();
         };
+        // Empty element to dynamically align the controls vertically, depending on which buttons
+        // are enabled. Avoids unreliable style computations in the script.
+        const verticalAligner = document.createElement("span");
+        verticalAligner.className = "harp-gl_v-align";
+        this.domElement.appendChild(verticalAligner);
+        // This element will receive the controls and ensure the vertical alignment in the CSS.
+        this.m_buttonsElement = document.createElement("div");
+        this.m_buttonsElement.className = "harp-gl_v-aligned";
+        this.domElement.appendChild(this.m_buttonsElement);
         const zoomInButton = document.createElement("button");
         zoomInButton.innerText = "+";
-        zoomInButton.id = "harp-gl_controls_zoom-in";
+        zoomInButton.className = "harp-gl_controls_button-top";
+        zoomInButton.classList.add("harp-gl_controls-button");
         const zoomOutButton = document.createElement("button");
         zoomOutButton.innerText = "-";
-        zoomOutButton.id = "harp-gl_controls_zoom-out";
+        zoomOutButton.className = "harp-gl_controls_button-bottom";
+        zoomOutButton.classList.add("harp-gl_controls-button");
         const tiltButton = document.createElement("button");
         tiltButton.innerText = "3D";
         tiltButton.id = "harp-gl_controls_tilt-button-ui";
+        tiltButton.title = "Toggle tilt";
+        tiltButton.classList.add("harp-gl_controls-button");
+        tiltButton.classList.add("harp-gl_controls_button-bottom");
         const compassButton = document.createElement("button");
         compassButton.id = "harp-gl_controls-button_compass";
+        compassButton.title = "Reset North";
+        compassButton.classList.add("harp-gl_controls-button");
+        compassButton.classList.add("harp-gl_controls_button-top");
         const compass = document.createElement("span");
         compass.id = "harp-gl_controls_compass";
         compassButton.appendChild(compass);
         // Optional zoom level displaying
         if (options.zoomLevel === "show") {
-            const div = document.createElement("div");
+            this.m_zoomLevelElement = document.createElement("div");
             controls.mapView.addEventListener(harp_mapview_1.MapViewEventNames.Render, this.m_onMapViewRenderEvent);
-            this.m_zoomLevelElement = div;
         }
         else if (options.zoomLevel === "input") {
             const input = document.createElement("input");
             input.type = "number";
+            input.step = "0.1"; // Avoids messages in the UI on hovering, when a tenth value exists.
             controls.mapView.addEventListener(harp_mapview_1.MapViewEventNames.Render, this.m_onMapViewRenderEvent);
             const updateZoom = (event) => {
                 controls.setZoomLevel(parseFloat(input.value));
@@ -12999,13 +13275,45 @@ class MapControlsUI {
             window.addEventListener("click", this.m_onWindowClick);
             this.m_zoomLevelElement = input;
         }
-        this.domElement.appendChild(zoomInButton);
-        if (this.m_zoomLevelElement !== null) {
-            this.domElement.appendChild(this.m_zoomLevelElement);
+        if (options.projectionSwitch) {
+            const switcher = document.createElement("button");
+            switcher.id = "harp-gl_controls_switch_projection";
+            switcher.classList.add("harp-gl_controls-button");
+            const getTitle = () => {
+                return `Switch to ${this.controls.mapView.projection.type === harp_geoutils_1.ProjectionType.Spherical
+                    ? "flat"
+                    : "globe"} projection`;
+            };
+            switcher.title = getTitle();
+            const globeSVG = getGlobeSVG();
+            const flatMapSVG = getFlatMapSVG();
+            switcher.innerHTML =
+                this.controls.mapView.projection.type === harp_geoutils_1.ProjectionType.Spherical
+                    ? flatMapSVG
+                    : globeSVG;
+            switcher.addEventListener("click", () => {
+                this.controls.mapView.projection =
+                    this.controls.mapView.projection.type === harp_geoutils_1.ProjectionType.Spherical
+                        ? harp_geoutils_1.mercatorProjection
+                        : harp_geoutils_1.sphereProjection;
+                switcher.title = getTitle();
+                switcher.innerHTML =
+                    this.controls.mapView.projection.type === harp_geoutils_1.ProjectionType.Spherical
+                        ? flatMapSVG
+                        : globeSVG;
+            });
+            this.m_projectionSwitchElement = switcher;
         }
-        this.domElement.appendChild(zoomOutButton);
-        this.domElement.appendChild(compassButton);
-        this.domElement.appendChild(tiltButton);
+        this.m_buttonsElement.appendChild(zoomInButton);
+        if (this.m_zoomLevelElement !== null) {
+            this.m_buttonsElement.appendChild(this.m_zoomLevelElement);
+        }
+        this.m_buttonsElement.appendChild(zoomOutButton);
+        this.m_buttonsElement.appendChild(compassButton);
+        this.m_buttonsElement.appendChild(tiltButton);
+        if (this.m_projectionSwitchElement !== null) {
+            this.m_buttonsElement.appendChild(this.m_projectionSwitchElement);
+        }
         zoomInButton.addEventListener("click", event => {
             const zoomLevel = controls.zoomLevelTargeted + controls.zoomLevelDeltaOnControl;
             controls.setZoomLevel(zoomLevel);
@@ -13024,15 +13332,18 @@ class MapControlsUI {
             compass.style.transform = `rotate(${THREE.Math.radToDeg(harp_mapview_1.MapViewUtils.extractAttitude(controls.mapView, controls.mapView.camera).yaw)}deg)`;
         });
         this.domElement.className = "harp-gl_controls";
-        zoomInButton.className = zoomOutButton.className = "harp-gl_controls-button";
-        tiltButton.className = compassButton.className = "harp-gl_controls-button";
         if (this.m_zoomLevelElement !== null) {
-            this.m_zoomLevelElement.className = "harp-gl_controls_zoom-level";
+            this.m_zoomLevelElement.classList.add("harp-gl_controls_zoom-level");
         }
         if (options.disableDefaultStyle !== true) {
             this.initStyle();
-            this.domElement.style.cssText =
-                "position: absolute; right: 5px; top: 50%; margin-top: -85px;";
+            this.domElement.style.cssText = `
+                position: absolute;
+                right: 5px;
+                top: 0;
+                height: 100%; /* Vertical alignment is done dynamically, in the rest of the CSS. */
+                pointer-events: none; /* Allows to click the map even though height is 100%. */
+            `;
         }
         return this;
     }
@@ -13053,108 +13364,151 @@ class MapControlsUI {
         }
         const style = document.createElement("style");
         style.id = "here-harp-controls.map-controls-ui-styles";
-        style.appendChild(document.createTextNode(`
-            .harp-gl_controls-button {
-                display: block;
-                background-color: #272d37;
-                width: 40px;
-                height: 40px;
-                font-size: 22px;
-                font-weight: bold;
-                outline: none;
-                margin:0;
-                border: none;
-                color: rgba(255, 255, 255, 0.8);
-                cursor: pointer;
-                border-radius: 4px;
-                box-shadow: 0 1px 4px 0  rgba(15, 22, 33, 0.4);
-                transition: all 0.1s;
-                padding: 0 0 1px 1px;
-                user-select: none;
-                position:relative;
-            }
-            #harp-gl_controls_tilt-button-ui {
-               font-size: 16px;
-            }
-            .harp-gl_controls-button:active {
-                background-color: #37afaa;
-                color: #eee;
-            }
-            .harp-gl_controls-button:focus {
-                outline:none;
-            }
-            #harp-gl_controls_zoom-in{
-                margin-bottom:0;
-                border-bottom-right-radius:0;
-                border-bottom-left-radius:0;
-            }
-            #harp-gl_controls_zoom-out{
-                margin-top:1px;
-                border-top-right-radius:0;
-                border-top-left-radius:0;
-            }
-            .harp-gl_controls_zoom-level {
-                display: block;
-                background-color: #fff;
-                width: 40px;
-                height: 20px;
-                font-size: 12px;
-                font-weight: bold;
-                outline: none;
-                border: none;
-                color: #555;
-                opacity: 0.87;
-                box-shadow: 0px 0px 4px #aaa;
-                padding: 2px 0 0;
-                text-align: center;
-                user-select: text;
-            }
-            input.harp-gl_controls_zoom-level::-webkit-outer-spin-button,
-            input.harp-gl_controls_zoom-level::-webkit-inner-spin-button {
-                /* display: none; <- Crashes Chrome on hover */
-                -webkit-appearance: none;
-                margin: 0; /* <-- Apparently some margin are still there even though it's hidden */
-            }
-            input.harp-gl_controls_zoom-level[type=number] {
-                -moz-appearance:textfield; /* Firefox */
-            }
-            #harp-gl_controls-button_compass{
-                margin: 5px 0;
-            }
-            #harp-gl_controls_compass{
-                pointer-events:none;
-                position: absolute;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                margin:0
-            }
-            #harp-gl_controls_compass::after{
-                content: " ";
-                position:absolute;
-                left:50%;
-                margin-left:-3px;
-                top:50%;
-                margin-top: -18px;
-                border:solid 3px rgba(0,0,0,0);
-                border-bottom:solid 15px #a34f2e;
-            }
-            #harp-gl_controls_compass::before{
-                content: " ";
-                position:absolute;
-                left:50%;
-                margin-left:-3px;
-                top:50%;
-                margin-top:0px;
-                border:solid 3px rgba(0,0,0,0);
-                border-top:solid 15px #eee;
-            }
-            `));
+        style.appendChild(document.createTextNode(getTextStyle()));
         document.head.appendChild(style);
     }
 }
 exports.MapControlsUI = MapControlsUI;
+function getTextStyle() {
+    return `
+        /* CSS trick to align another div dynamically. */
+        .harp-gl_v-align{
+            height: 100%;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        /* The target element to align vertically with vertical-align. */
+        .harp-gl_v-aligned{
+            pointer-events: all;
+            vertical-align: middle;
+            display: inline-block;
+        }
+        .harp-gl_controls-button {
+            display: block;
+            background-color: #272d37;
+            width: 40px;
+            height: 40px;
+            font-size: 22px;
+            font-weight: bold;
+            outline: none;
+            margin:0;
+            border: none;
+            color: rgba(255, 255, 255, 0.8);
+            cursor: pointer;
+            border-radius: 4px;
+            box-shadow: 0px 0px 5px 0 hsl(220, 4%, 40%);
+            transition: all 0.1s;
+            padding: 0 0 1px 1px;
+            user-select: none;
+            position:relative;
+        }
+        #harp-gl_controls_tilt-button-ui {
+            font-size: 16px;
+        }
+        .harp-gl_controls-button:active {
+            background-color: #37afaa;
+            color: #eee;
+        }
+        .harp-gl_controls-button:focus {
+            outline:none;
+        }
+        .harp-gl_controls_button-top{
+            margin-bottom:0;
+            border-bottom-right-radius:0;
+            border-bottom-left-radius:0;
+        }
+        .harp-gl_controls_button-bottom{
+            margin-top:1px;
+            border-top-right-radius:0;
+            border-top-left-radius:0;
+        }
+        .harp-gl_controls_zoom-level {
+            display: block;
+            background-color: #fff;
+            width: 40px;
+            height: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            outline: none;
+            border: none;
+            color: #555;
+            opacity: 0.87;
+            box-shadow: 0px 0px 4px #aaa;
+            padding: 2px 0 0;
+            text-align: center;
+            user-select: text;
+        }
+        input.harp-gl_controls_zoom-level::-webkit-outer-spin-button,
+        input.harp-gl_controls_zoom-level::-webkit-inner-spin-button {
+            /* display: none; <- Crashes Chrome on hover */
+            -webkit-appearance: none;
+            margin: 0; /* <-- Apparently some margin are still there even though it's hidden */
+        }
+        input.harp-gl_controls_zoom-level[type=number] {
+            -moz-appearance:textfield; /* Firefox */
+        }
+        #harp-gl_controls-button_compass{
+            margin: 5px 0 0 0;
+        }
+        #harp-gl_controls_compass{
+            pointer-events:none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            margin:0
+        }
+        #harp-gl_controls_compass::after{
+            content: " ";
+            position:absolute;
+            left:50%;
+            margin-left:-3px;
+            top:50%;
+            margin-top: -18px;
+            border:solid 3px rgba(0,0,0,0);
+            border-bottom:solid 15px #a34f2e;
+        }
+        #harp-gl_controls_compass::before{
+            content: " ";
+            position:absolute;
+            left:50%;
+            margin-left:-3px;
+            top:50%;
+            margin-top:0px;
+            border:solid 3px rgba(0,0,0,0);
+            border-top:solid 15px #eee;
+        }
+        #harp-gl_controls_switch_projection{
+            margin-top:5px;
+        }
+        .harp-gl_controls_switch_svg{
+            width: 25px;
+            height: 25px;
+            stroke: #d4d5d7;
+            fill: #d4d5d7;
+        }
+    `;
+}
+// tslint:disable:max-line-length
+function getFlatMapSVG() {
+    return `
+    <svg style="margin-top:5px;" class="harp-gl_controls_switch_svg" width="25" height="25" xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg">
+        <rect id="svg_1" stroke-width="2" height="13.51524" width="18.35821" y="5.80349" x="3.21307" fill="none"/>
+        <path id="svg_14" d="m9.52018,7.71815l1.2357,-0.0032l-0.61945,1.18258l-0.61625,-1.17938z"/>
+        <path id="svg_15" d="m4.11409,7.32396l3.65718,-0.0032l0.28156,2.13991l-2.59042,1.57678l0.50682,1.80203l2.25254,0.8447l-0.90101,2.0836l0.28157,2.25254l-3.26619,-3.04093l0.67576,-2.02728l-0.61945,-1.97097l-1.01364,-3.15356l0.73528,-0.50362z"/>
+        <path id="svg_17" d="m13.23688,7.4929l2.02409,-0.0032l0.78839,1.29521l2.47779,-1.35152l2.75936,0.78839l0,1.57678l-0.73208,0.61945l-0.28157,1.97097c0,0 -0.67256,0.8479 -0.72888,0.90422c-0.05631,0.05631 0.28157,1.06996 0.33788,1.18258c0.05631,0.11263 -1.68941,-1.35152 -1.6926,-1.35472c-0.0032,-0.0032 -0.16574,1.29841 -0.16894,1.29521c-0.0032,-0.0032 -1.57358,-1.34832 -1.57678,-1.35152c-0.0032,-0.0032 -0.72888,0.67896 -0.73208,0.67576c-0.0032,-0.0032 -0.8415,-0.67256 -0.8447,-0.67576c-0.0032,-0.0032 0.73528,2.0868 0.79159,2.0868c0.05631,0 -0.50682,3.20987 -0.51002,3.20667c-0.0032,-0.0032 -1.2357,-0.16574 -1.34832,-0.16574c-0.11263,0 -0.95733,-1.52046 -0.90102,-1.57678c0.05631,-0.05631 0,-1.80203 -0.0032,-1.80523c-0.0032,-0.0032 -1.40464,-0.33468 -1.40784,-0.33788c-0.0032,-0.0032 -0.05311,-1.74252 -0.05631,-1.74572c-0.0032,-0.0032 1.18578,-0.8415 1.18258,-0.8447c-0.0032,-0.0032 1.69261,-0.16574 1.74892,-0.16574c0.05631,0 1.2389,-1.06996 1.2357,-1.07316c-0.0032,-0.0032 -1.91146,-0.10943 -1.91466,-0.11263c-0.0032,-0.0032 -1.96777,0.17214 -1.97097,0.16894c-0.0032,-0.0032 1.52366,-3.20667 1.52366,-3.20667z"/>
+    </svg>`;
+}
+function getGlobeSVG() {
+    return `
+    <svg style="margin-top:5px;" stroke-width="2" class="harp-gl_controls_switch_svg" width="50" height="50" viewBox="0 0 25 25" xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg">
+        <ellipse ry="9.79855" rx="4.56139" id="svg_6" cy="11.99798" cx="11.99798" fill="none"/>
+        <line id="svg_8" y2="8.16866" x2="21.12086" y1="8.16866" x1="3.10044"/>
+        <line id="svg_9" y2="16.10887" x2="21.0645" y1="16.10887" x1="3.04409"/>
+        <ellipse id="svg_11" ry="9.79855" rx="9.82671" cy="11.94167" cx="12.02614" fill="none"/>
+    </svg>`;
+}
 
 
 /***/ }),
@@ -13851,6 +14205,7 @@ function __export(m) {
 Object.defineProperty(exports, "__esModule", { value: true });
 __export(__webpack_require__(/*! ./lib/AnimatedExtrusionHandler */ "../harp-mapview/lib/AnimatedExtrusionHandler.ts"));
 __export(__webpack_require__(/*! ./lib/CameraMovementDetector */ "../harp-mapview/lib/CameraMovementDetector.ts"));
+__export(__webpack_require__(/*! ./lib/ClipPlanesEvaluator */ "../harp-mapview/lib/ClipPlanesEvaluator.ts"));
 __export(__webpack_require__(/*! ./lib/ColorCache */ "../harp-mapview/lib/ColorCache.ts"));
 __export(__webpack_require__(/*! ./lib/composing */ "../harp-mapview/lib/composing/index.ts"));
 __export(__webpack_require__(/*! ./lib/ConcurrentDecoderFacade */ "../harp-mapview/lib/ConcurrentDecoderFacade.ts"));
@@ -14276,7 +14631,7 @@ class BackgroundDataSource extends DataSource_1.DataSource {
         const tile = new Tile_1.Tile(this, tileKey);
         tile.forceHasGeometry(true);
         tile.removeDecodedTile(); // Skip geometry loading.
-        TileGeometryCreator_1.TileGeometryCreator.instance.addGroundPlane(tile);
+        TileGeometryCreator_1.TileGeometryCreator.instance.addGroundPlane(tile, Number.MIN_SAFE_INTEGER);
         return tile;
     }
 }
@@ -14467,10 +14822,10 @@ const epsilon = 0.000001;
  * Simplest camera clip planes evaluator, interpolates near/far planes based on ground distance.
  *
  * At general ground distance to camera along the surface normal is used as reference point for
- * planes evaluation, where near plane distance is set as fraction of this distance refered as
+ * planes evaluation, where near plane distance is set as fraction of this distance refereed as
  * [[nearMultiplier]]. Far plane equation has its own multiplier - [[nearFarMultiplier]],
  * which is applied to near plane and offset giving finally far plane distance.
- * This evaluator supports both planar and spherical projections, although it's behaviour is
+ * This evaluator supports both planar and spherical projections, although it's behavior is
  * slightly different in each case. General algorithm sets near plane between camera and
  * ground level, while far plane is just calculated using scale and bias approach with far offset
  * and multiplier.
@@ -14507,36 +14862,38 @@ class InterpolatedClipPlanesEvaluator {
         return 0;
     }
     evaluateClipPlanes(mapView) {
+        const camera = mapView.camera;
+        const projection = mapView.projection;
         let nearPlane = this.nearMin;
         let farPlane = this.farMin;
-        if (mapView.projection.type === harp_geoutils_1.ProjectionType.Spherical) {
+        if (projection.type === harp_geoutils_1.ProjectionType.Spherical) {
             // near and far plane for a set up where
             // the camera is looking at the center of the scene.
             const r = harp_geoutils_1.EarthConstants.EQUATORIAL_RADIUS;
-            const d = mapView.camera.position.length();
+            const d = camera.position.length();
             const alpha = Math.asin(r / d);
             // Extract X, Y, Z axes into tmp vectors array.
-            mapView.camera.matrixWorld.extractBasis(this.m_tmpVectors[0], this.m_tmpVectors[1], this.m_tmpVectors[2]);
+            camera.matrixWorld.extractBasis(this.m_tmpVectors[0], this.m_tmpVectors[1], this.m_tmpVectors[2]);
             // Setup quaternion based on X axis.
             this.m_tmpQuaternion.setFromAxisAngle(this.m_tmpVectors[0], alpha);
-            // Aquire forward vector based on Z axis reversed (keep it in tmpVectors[2]).
+            // Acquire forward vector based on Z axis reversed (keep it in tmpVectors[2]).
             const fwd = this.m_tmpVectors[2].negate();
             // Apply quaternion rotation to forward vector, store it in tmpVectors[1].
             const fwdRot = this.m_tmpVectors[1].copy(fwd).applyQuaternion(this.m_tmpQuaternion);
             // Store camera position tmpVectors[0] and reference it with p.
-            const p = this.m_tmpVectors[0].copy(mapView.camera.position);
+            const p = this.m_tmpVectors[0].copy(camera.position);
             p.addScaledVector(fwdRot, Math.sqrt(d * d - r * r));
-            farPlane = p.sub(mapView.camera.position).dot(fwd);
-            nearPlane = Math.max(this.nearMin, mapView.projection.groundDistance(mapView.camera.position) * this.nearMultiplier);
+            farPlane = p.sub(camera.position).dot(fwd);
+            nearPlane = Math.max(this.nearMin, projection.groundDistance(camera.position) * this.nearMultiplier);
         }
-        else if (mapView.projection.type === harp_geoutils_1.ProjectionType.Planar) {
-            const groundDistance = mapView.projection.groundDistance(mapView.camera.position);
+        else if (projection.type === harp_geoutils_1.ProjectionType.Planar) {
+            const groundDistance = projection.groundDistance(camera.position);
             nearPlane = Math.max(this.nearMin, groundDistance * this.nearMultiplier);
             // Will be already clamped to minFar due to clamping above.
             farPlane = nearPlane * this.nearFarMultiplier + this.farOffset;
         }
         else {
-            harp_utils_1.assert(false, "Unsuported projection type");
+            harp_utils_1.assert(false, "Unsupported projection type");
         }
         const viewRanges = {
             near: nearPlane,
@@ -14571,7 +14928,7 @@ class ElevationBasedClipPlanesEvaluator {
      * bit offset to your assumed maximum elevation.
      * @note Reasonable values are in between (-DeadSeeDepression, MtEverestHeight>, both values
      * are defined in [[EarthConstant]] as [[EarthConstant.MIN_ELEVATION]] and
-     * [[EarthConstant.MAX_ELEVATION]] respectivelly.
+     * [[EarthConstant.MAX_ELEVATION]] respectively.
      * @see minElevation for more information about precision and rounding errors.
      */
     set maxElevation(elevation) {
@@ -14590,9 +14947,9 @@ class ElevationBasedClipPlanesEvaluator {
      *
      * @param elevation the minimum elevation (depression) in world units (meters).
      * @note If you set this parameter to zero you may not see any features rendered if they are
-     * just below the sea level more then half of [[nearFarMargin]] assumed. Similarly if set to
+     * just below the sea level more than half of [[nearFarMargin]] assumed. Similarly if set to
      * -100m and rendered features lays exactly in such depression, you may notice that problem.
-     * The errors ussually come from projection precision loss and depth buffer nature (significant
+     * The errors usually come from projection precision loss and depth buffer nature (significant
      * precision loss closer to far plane). Thus is such cases either increase the margin (if you
      * are sure features are just at this elevation, or setup bigger offset for [[minElevation]].
      * Reasonable values are between <-DeadSeaDepression, MtEverestHeight), where the first denotes
@@ -14602,7 +14959,7 @@ class ElevationBasedClipPlanesEvaluator {
      */
     set minElevation(elevation) {
         this.m_minElevation = elevation;
-        // Max elevation should be at least equal or bigger then min elevation.
+        // Max elevation should be at least equal or bigger than min elevation.
         this.m_maxElevation = Math.max(elevation, this.m_maxElevation);
     }
     /**
@@ -14616,7 +14973,7 @@ exports.ElevationBasedClipPlanesEvaluator = ElevationBasedClipPlanesEvaluator;
 /**
  * Top view, clip planes evaluator that computes view ranges based on ground distance and elevation.
  *
- * This evaluator supports both planar and spherical projections, although it behaviour is
+ * This evaluator supports both planar and spherical projections, although it behavior is
  * slightly different in each case. General algorithm sets near plane and far plane close
  * to ground level, but taking into account maximum and minimum elevation of features on the ground.
  *
@@ -14636,30 +14993,30 @@ class TopViewClipPlanesEvaluator extends ElevationBasedClipPlanesEvaluator {
      * buildings). Defaults to Burj Khalifa building height.
      * @param minElevation defines far plane offset from the ground surface, negative values moves
      * far plane below the ground level (use it to render depressions). Default zero - sea level.
-     * @param nearMin minimum allowable near plane distance from camera, must be bigger then zero.
-     * @param nearFarMargin minimum distance between near and far plane, have to be significantly
-     * bigger then zero (especially if [[maxElevation]], [[minElevation]] are equal), otherwise you
-     * may notice flickering during rendering, or even render empty scene if frustum planes are
-     * almost equal.
+     * @param nearMin minimum allowable near plane distance from camera, must be bigger than zero.
+     * @param nearFarMarginRatio minimum distance between near and far plane, as a ratio of average
+     * near/far plane distance, it have to be significantly bigger than zero (especially if
+     * [[maxElevation]] and [[minElevation]] are equal), otherwise you may notice flickering when
+     * rendering, or even render empty scene if frustum planes are almost equal.
      * @param farMaxRatio maximum ratio between ground and far plane distance, allows to limit
-     * viewing distance at overall. Have to be bigger then 1.0.
+     * viewing distance at overall. Have to be bigger than 1.0.
      * @note Keep in mind that this evaluator does not evaluate terrain (or building) elevation
      * automatically, to keep such features rendered (between frustum planes) use [[minElevation]],
      * [[maxElevation]] constraints. You may change this parameters at any time, but it requires
      * repeating [[evaluatePlanes]] step, if your camera is moving you need to evaluate planes
      * anyway.
      * @note You may treat [[minElevation]] and [[maxElevation]] parameters as the maximum and
-     * minimum renderable elevation respectivelly along the surface normal, when camera is
+     * minimum renderable elevation respectively along the surface normal, when camera is
      * constantly looking downwards (top-down view). If you need [[ClipPlanesEvaluator]] for
      * cameras that support tilt or yaw please use [[TiltViewClipPlanesEvaluator]].
      * @note [[nearFarMaxRatio]] does not limit far plane when spherical projection is in use,
      * the algorithm used there estimates distance to point on tangent where line from camera
-     * touches the sphere horizont and there is no reason to clamp it.
+     * touches the sphere horizon and there is no reason to clamp it.
      */
-    constructor(maxElevation = harp_geoutils_1.EarthConstants.MAX_BUILDING_HEIGHT, minElevation = 0, nearMin = 1.0, nearFarMargin = 10.0, farMaxRatio = 1.8) {
+    constructor(maxElevation = harp_geoutils_1.EarthConstants.MAX_BUILDING_HEIGHT, minElevation = 0, nearMin = 1.0, nearFarMarginRatio = 0.05, farMaxRatio = 1.8) {
         super(maxElevation, minElevation);
         this.nearMin = nearMin;
-        this.nearFarMargin = nearFarMargin;
+        this.nearFarMarginRatio = nearFarMarginRatio;
         this.farMaxRatio = farMaxRatio;
         /**
          * Helper for reducing number of objects created at runtime.
@@ -14674,8 +15031,9 @@ class TopViewClipPlanesEvaluator extends ElevationBasedClipPlanesEvaluator {
          */
         this.m_tmpQuaternion = new THREE.Quaternion();
         harp_utils_1.assert(nearMin > 0);
-        harp_utils_1.assert(nearFarMargin > epsilon);
+        harp_utils_1.assert(nearFarMarginRatio > epsilon);
         harp_utils_1.assert(farMaxRatio > 1.0);
+        const nearFarMargin = nearFarMarginRatio * nearMin;
         this.m_minimumViewRange = {
             near: nearMin,
             far: nearMin + nearFarMargin,
@@ -14690,7 +15048,7 @@ class TopViewClipPlanesEvaluator extends ElevationBasedClipPlanesEvaluator {
         else if (mapView.projection.type === harp_geoutils_1.ProjectionType.Planar) {
             return this.evaluateDistancePlanarProj(mapView.camera, mapView.projection);
         }
-        harp_utils_1.assert(false, "Unsuported projection type");
+        harp_utils_1.assert(false, "Unsupported projection type");
         return Object.assign({}, this.minimumViewRange);
     }
     /**
@@ -14701,7 +15059,7 @@ class TopViewClipPlanesEvaluator extends ElevationBasedClipPlanesEvaluator {
         return this.m_minimumViewRange;
     }
     /**
-     * Calculate camera altitute (closest distance) to ground level in world units.
+     * Calculate camera altitude (closest distance) to ground level in world units.
      * @param camera
      * @param projection
      */
@@ -14721,9 +15079,12 @@ class TopViewClipPlanesEvaluator extends ElevationBasedClipPlanesEvaluator {
         nearPlane = groundDistance - this.maxElevation;
         farPlane = groundDistance - this.minElevation;
         // Apply the constraints.
-        nearPlane = Math.max(nearPlane - this.nearFarMargin / 2, this.nearMin);
+        nearPlane = Math.max(nearPlane, this.nearMin);
         farPlane = Math.min(farPlane, farMax);
-        farPlane = Math.max(farPlane + this.nearFarMargin / 2, nearPlane + this.nearFarMargin);
+        // Apply margins
+        const nearFarMargin = (this.nearFarMarginRatio * (nearPlane + farPlane)) / 2;
+        nearPlane = Math.max(nearPlane - nearFarMargin / 2, this.nearMin);
+        farPlane = Math.max(farPlane + nearFarMargin / 2, nearPlane + nearFarMargin);
         const viewRanges = {
             near: nearPlane,
             far: farPlane,
@@ -14750,104 +15111,41 @@ class TopViewClipPlanesEvaluator extends ElevationBasedClipPlanesEvaluator {
         if (camera.type === "PerspectiveCamera") {
             // This solution computes near and far plane for a set up where
             // the camera is looking at the center of the scene.
-            //         , - ~ ~ ~ - ,
-            //     , '               ' ,        E
-            //   ,           .           ,    . ' far + elev
-            //  ,            .   r + e   , '   /
-            // ,             .     ,  '    ,  /
-            // ,             . O '         , / te
-            // ,             | .           ,/
-            //  ,            |   .  r     ,/
-            //   ,           |      .    ,
-            //     ,         |        , '_____ far
-            //       ' -_, _ | _ ,  ' / T
-            //     near      |      /
-            //               |    / t
-            //             d |  /
-            //               |/
-            //               C
             // The far plane distance calculus requires finding the sphere tangent line that is
             // co-linear with (goes thru) camera position, such tangent creates right angle
             // with sphere diameter where it touches its surface (point T). Given that sphere is
-            // always at world orgin and camera orbits around it we have:
+            // always at world origin and camera orbits around it we have (see
+            // #getTangentBasedFarPlane):
             // angle(OTC) = 90
             // sin(OCT) = sin(alpha) = r / d
             // alpha = asin(r / d)
             const alpha = Math.asin(r / d);
-            // The distance to tangent point may be described as:
-            // t = sqrt(d^2 - r^2)
-            const t = Math.sqrt(d * d - r * r);
-            // Because we would like to see elevated geometry that may be visible beyond the tangent
-            // point on ground surface, we need to extend viewing distance along the tangent line
-            // by te (see graph above). Knowing that OTE forms right angle, we have:
-            // (r+e)^2 = r^2 + te^2
-            // te = sqrt((r+e)^2 - r^2)
-            // This reduces to:
-            // te = sqrt(r^2 + 2*r*e + e^2 - r^2)
-            // te = sqrt(2*r*e + e^2)
-            // There may be situations when maximum elevation still remains below sea level (< 0) or
-            // it is neglible, in such cases tangent extension (te) is not required.
-            const te = this.maxElevation < epsilon
-                ? 0
-                : Math.sqrt(2 * r * this.maxElevation + this.maxElevation * this.maxElevation);
-            // Next step is to project CT vector onto camera eye (forward) vector to get maximum
-            // camera far plane distance. Point on sphere beyond that point won't be visible anyway
-            // unless they are above the ground surface. For such cases [[this.maxElevation]]
-            // applies, thus we project entire CE vector of length equal: t + te.
-            // Extract camera X, Y, Z orientation axes into tmp vectors array.
-            camera.matrixWorld.extractBasis(this.m_tmpVectors[0], this.m_tmpVectors[1], this.m_tmpVectors[2]);
-            // Setup quaternion (based on X axis) for angle between tangent and camera eye.
-            this.m_tmpQuaternion.setFromAxisAngle(this.m_tmpVectors[0], alpha);
-            // Aquire camera (eye) forward vector from Z axis reversed (keep it in tmpVectors[2]).
-            const cameraFwdVec = this.m_tmpVectors[2].negate();
-            // Apply quaternion to forward vector, creating tangent vector (store in tmpVectors[1]).
-            const tangentVec = this.m_tmpVectors[1]
-                .copy(cameraFwdVec)
-                .applyQuaternion(this.m_tmpQuaternion);
-            // Give it a proper length
-            tangentVec.multiplyScalar(t + te);
-            // Calculate tanget projection onto camera eye vector, giving far plane distance.
-            farPlane = tangentVec.dot(cameraFwdVec);
+            // If alpha it bigger than half fov angle, our visibility limit is set by tangent
+            // line, otherwise we need to find top (or right) plane intersection with sphere,
+            // which is definitely closer than the tangent point mentioned above.
+            const cam = camera;
+            // Take fov directly if it is vertical, otherwise we translate it using aspect ratio:
+            const aspect = cam.aspect > 1 ? cam.aspect : 1 / cam.aspect;
+            const halfFovAngle = THREE.Math.degToRad((cam.fov * aspect) / 2);
+            farPlane =
+                halfFovAngle > alpha
+                    ? this.getTangentBasedFarPlane(cam, d, r, alpha)
+                    : this.getFovBasedFarPlane(cam, d, r, 2 * halfFovAngle, projection);
         }
         // Orthographic camera projection
         else {
-            //         , - ~ ~ ~ - ,
-            //     , '               ' ,     E
-            //   ,            .--------- ,-.'- far + elev
-            // | ,            .   r + e , `, |
-            // |,             .     , '     ,| te
-            // |,             . O '.........,|..
-            // |,             |        r    ,|  far
-            // | ,            |            , |
-            // |  ,           |           ,  | t
-            // |    ,         |        , '   |
-            // |      ' -_, _ | _ ,  '       |
-            // |    near      | \/___________| near - elev
-            // |              |              |
-            // |            d |              |
-            // |              |              |
-            //                C
-            // The distance to tangent point may be described as:
-            const t = d;
-            // Tangent extension due to terrain elevation behind the horizon may be calculated
-            // based on the right triangle:
-            // (r+maxElev)^2 = r^2 + te^2
-            // te = sqrt((r+maxElev)^2 - r^2)
-            // although we may not calculate it if elevation is neglible:
-            const te = this.maxElevation < epsilon
-                ? 0
-                : Math.sqrt(r + this.maxElevation) * (r + this.maxElevation) - r * r;
-            // Now far plane distance is constituted with:
-            farPlane = t + te;
-            // Both near and far planes distances are directly applied to frustum, because tangents'
-            // lines are parallel to camera look at vector.
+            farPlane = this.getOrthoBasedFarPlane(d, r);
         }
-        // Apply the constraints.
-        nearPlane = Math.max(nearPlane - this.nearFarMargin / 2, this.nearMin);
-        // In extreme cases the largest depression assumed may be further then tangent
+        // In extreme cases the largest depression assumed may be further than tangent
         // based far plane distance, take it into account
-        farPlane = Math.max(farPlane, cameraAltitude - this.minElevation);
-        farPlane = Math.max(farPlane + this.nearFarMargin / 2, nearPlane + this.nearFarMargin);
+        const farMin = cameraAltitude - this.minElevation;
+        // Apply the constraints.
+        nearPlane = Math.max(nearPlane, this.nearMin);
+        farPlane = Math.max(farPlane, farMin);
+        // Apply margins
+        const nearFarMargin = (this.nearFarMarginRatio * (nearPlane + farPlane)) / 2;
+        nearPlane = Math.max(nearPlane - nearFarMargin / 2, this.nearMin);
+        farPlane = Math.max(farPlane + nearFarMargin / 2, nearPlane + nearFarMargin);
         const viewRanges = {
             near: nearPlane,
             far: farPlane,
@@ -14855,6 +15153,161 @@ class TopViewClipPlanesEvaluator extends ElevationBasedClipPlanesEvaluator {
             maximum: farPlane
         };
         return viewRanges;
+    }
+    getTangentBasedFarPlane(camera, d, r, alpha) {
+        // Find tangent point intersection distance
+        //         , - ~ ~ ~ - ,
+        //     , '               ' ,        E
+        //   ,           .           ,    . ' far + elev
+        //  ,            .   r + e   , '   /
+        // ,             .     ,  '    ,  /
+        // ,             . O '         , / te
+        // ,             | .           ,/
+        //  ,            |   .  r     ,/
+        //   ,           |      .    ,
+        //     ,         |        , '_____ far
+        //       ' -_, _ | _ ,  ' / T
+        //     near      |      /
+        //               |    / t
+        //             d |  /
+        //               |/
+        //               C
+        // The distance to tangent point may be described as:
+        // t = sqrt(d^2 - r^2)
+        const t = Math.sqrt(d * d - r * r);
+        // Because we would like to see elevated geometry that may be visible beyond
+        // the tangent point on ground surface, we need to extend viewing distance along
+        // the tangent line by te (see graph above). Knowing that OTE forms right angle,
+        // we have:
+        // (r+e)^2 = r^2 + te^2
+        // te = sqrt((r+e)^2 - r^2)
+        // This reduces to:
+        // te = sqrt(r^2 + 2*r*e + e^2 - r^2)
+        // te = sqrt(2*r*e + e^2)
+        // There may be situations when maximum elevation still remains below sea level
+        // (elevation < 0) or it is negligible (elevation ~ epsilon), in such cases tangent
+        // extension (te) is not required.
+        const te = this.maxElevation < epsilon
+            ? 0
+            : Math.sqrt(2 * r * this.maxElevation + this.maxElevation * this.maxElevation);
+        // Next step is to project CT vector onto camera eye (forward) vector to get maximum
+        // camera far plane distance. Point on sphere beyond that point won't be visible
+        // anyway unless they are above the ground surface.
+        // For such cases [[this.maxElevation]] applies, thus we project entire CE
+        // vector of length equal: t + te.
+        // Extract camera X, Y, Z orientation axes into tmp vectors array.
+        camera.matrixWorld.extractBasis(this.m_tmpVectors[0], this.m_tmpVectors[1], this.m_tmpVectors[2]);
+        // Setup quaternion (based on X axis) for angle between tangent and camera eye.
+        this.m_tmpQuaternion.setFromAxisAngle(this.m_tmpVectors[0], alpha);
+        // Acquire camera (eye) forward vector from Z axis reversed (keep in tmpVectors[2]).
+        const cameraFwdVec = this.m_tmpVectors[2].negate();
+        // Apply quaternion to forward vector, creating tangent vector (in tmpVectors[1]).
+        const tangentVec = this.m_tmpVectors[1]
+            .copy(cameraFwdVec)
+            .applyQuaternion(this.m_tmpQuaternion);
+        // Give it a proper length
+        tangentVec.multiplyScalar(t + te);
+        // Calculate tangent projection onto camera eye vector, giving far plane distance.
+        return tangentVec.dot(cameraFwdVec);
+    }
+    getFovBasedFarPlane(camera, d, r, fovAngle, projection) {
+        // Find intersection point that is closer to tangent point.
+        //
+        //         , - ~ ~ ~ - ,
+        //     , '               ' ,
+        //   ,           .           ,
+        //  ,            .     r     ,' T1
+        // ,             .     ,  '  / ,
+        // ,             . O.'  a   /  ,
+        // ,             | .  `  . /   ,
+        //  ,            |   .  r / TA,
+        //   ,           |    .  /   ,
+        //     ,         |     ./  ,'_____ far
+        //       ' -_, _ | _ , /' T0
+        //     near      |    /
+        //               |   / t
+        //             d | /
+        //               |/
+        //               C
+        //
+        // See:
+        // tslint:disable-next-line: max-line-length
+        // https://www.scratchapixel.com/lessons/3d-basic-rendering/minimal-ray-tracer-rendering-simple-shapes/ray-sphere-intersection
+        // Vector from camera to world center
+        const dVec = camera.position;
+        // Extract camera X, Y, Z orientation axes into tmp vectors array.
+        camera.matrixWorld.extractBasis(this.m_tmpVectors[0], this.m_tmpVectors[1], this.m_tmpVectors[2]);
+        // Setup quaternion (X axis based) for angle between frustum plane and camera eye.
+        this.m_tmpQuaternion.setFromAxisAngle(this.m_tmpVectors[0], fovAngle / 2);
+        // Acquire camera (eye) forward vector from Z axis (keep it in tmpVectors[2]).
+        const cameraFwdVec = this.m_tmpVectors[2];
+        // Apply quaternion to forward vector, creating intersection vector, which is
+        // parallel to top or right frustum plane (depending on the aspect ratio).
+        const tVec = this.m_tmpVectors[1].copy(cameraFwdVec).applyQuaternion(this.m_tmpQuaternion);
+        // Calculate camera to origin vector projection onto frustum plane (top or right).
+        // This gives us the length of CTA segment:
+        const cta = dVec.dot(tVec);
+        // If it is negative, it means that the dVec and the tVec points in
+        // opposite directions - there is no intersection - or intersection could
+        // potentially be behind the intersection ray's origin (camera position).
+        if (cta < 0) {
+            // Intersection points are behind camera, camera looks in wrong direction.
+            const groundDistance = this.getCameraAltitude(camera, projection);
+            // Setup far plane to maximum distance.
+            return groundDistance * this.farMaxRatio;
+        }
+        // Knowing the length of |CTA| we just need to subtract the length of |T0TA|
+        // segment from it to get far plane distance.
+        // In order to calculate |T0TA| we firstly need to use use Pythagorean theorem to
+        // find length of |OTA| = a. Here we use the right triangle formed by O-C-TA points:
+        // |OC|^2 = |CTA|^2 + |OTA|^2, where |OTA| = a, |OC| = d, |CTA| = cta
+        // a^2 = d^2 - cta^2
+        const a2 = dVec.dot(dVec) - cta * cta;
+        // Note that if a is greater than sphere radius the ray misses the sphere and
+        // thus there is no intersection at all.
+        const r2 = r * r;
+        harp_utils_1.assert(a2 <= r2, "Please use this evaluator only for top view camera poses.");
+        // Now to find the length of |T0TA| == |T1TA| we use the second right triangle
+        // formed by O-T0-TA points. Of course we know that |T0TA| segment length is
+        // equal to |T1TA|, and |OT0| segment is simply sphere radius.
+        // In order to find |T0TA| length we again use Pythagorean theorem, which says:
+        // |OT0|^2 = |OTA|^2 + |T0TA|^2, where |OTO| = r, |OTA| = a
+        // |T0TA|^2 = r^2 - a^2
+        const tota = Math.sqrt(r2 - a2);
+        // Finally our far plane (intersection point) is defined as:
+        return cta - tota;
+    }
+    getOrthoBasedFarPlane(d, r) {
+        //         , - ~ ~ ~ - ,
+        //     , '               ' ,     E
+        //   ,            .--------- ,-.'- far + elev
+        // | ,            .   r + e , `, |
+        // |,             .     , '     ,| te
+        // |,             . O '.........,|..
+        // |,             |        r    ,|  far
+        // | ,            |            , |
+        // |  ,           |           ,  | t
+        // |    ,         |        , '   |
+        // |      ' -_, _ | _ ,  '       |
+        // |    near      | \/___________| near - elev
+        // |              |              |
+        // |            d |              |
+        // |              |              |
+        //                C
+        // The distance to tangent point may be described as:
+        const t = d;
+        // Tangent extension due to terrain elevation behind the horizon may be calculated
+        // based on the right triangle:
+        // (r+maxElev)^2 = r^2 + te^2
+        // te = sqrt((r+maxElev)^2 - r^2)
+        // although we may not calculate it if elevation is negligible:
+        const te = this.maxElevation < epsilon
+            ? 0
+            : Math.sqrt(r + this.maxElevation) * (r + this.maxElevation) - r * r;
+        // Both near and far planes distances are directly applied to frustum, because tangents'
+        // lines are parallel to camera look at vector.
+        // Now far plane distance is constituted with:
+        return t + te;
     }
 }
 exports.TopViewClipPlanesEvaluator = TopViewClipPlanesEvaluator;
@@ -14880,19 +15333,19 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
         else if (mapView.projection.type === harp_geoutils_1.ProjectionType.Planar) {
             return this.evaluatePlanarProj(mapView);
         }
-        harp_utils_1.assert(false, "Unsuported projection type");
+        harp_utils_1.assert(false, "Unsupported projection type");
         return Object.assign({}, this.minimumViewRange);
     }
     /**
      * Calculate the camera distance to the ground in direction of look at vector.
-     * This is not equivalent to camera altitute cause value will change according to look at
+     * This is not equivalent to camera altitude cause value will change according to look at
      * direction. It simply measures the distance of intersection point between ray from
      * camera and ground level, yet without taking into account terrain elevation nor buildings.
      * @param camera
      * @param projection
      * @note Use with extreme care cause due to optimizations the internal temporary vectors
-     * are used (m_tmpVectors[0], m_tmpVectors[1]). Thoose should not be used in outlining
-     * function scope (calle).
+     * are used (m_tmpVectors[0], m_tmpVectors[1]). Those should not be used in outlining
+     * function scope (caller).
      */
     getCameraLookAtDistance(camera, projection) {
         harp_utils_1.assert(projection.type !== harp_geoutils_1.ProjectionType.Spherical);
@@ -14922,6 +15375,8 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
      */
     getFrustumGroundIntersectionDist(mapView) {
         harp_utils_1.assert(mapView.projection.type !== harp_geoutils_1.ProjectionType.Spherical);
+        const camera = mapView.camera;
+        const projection = mapView.projection;
         // This algorithm computes the length of frustum planes before intersecting with a flat
         // ground surface. Entire computation is split over two projections method and performed
         // for top and bottom plane, with addition of terrain (ground) elevation which is taken
@@ -14947,10 +15402,10 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
         // - z1 == z2 == z, for perspective camera all planes origin its the same
         // - a is a right angle.
         // - e is the look at vector of the camera.
-        // - t and b are the frustum planes of the camera (top and bottom respectivelly).
+        // - t and b are the frustum planes of the camera (top and bottom respectively).
         // - angle between c1 to c2 is the fov.
         // - c1, c2 - vectors from camera to the ground along frustum planes.
-        // - angles between c1 and e or e and c2 splits fov on equal halfs.
+        // - angles between c1 and e or e and c2 splits fov on equal halves.
         // - d1 and d2 are the intersection points of the frustum with the world/ground plane.
         // - angle between z and e is the pitch of the camera.
         // - angle between g and e is the tilt angle.
@@ -14960,15 +15415,15 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
         // plane.
         // This are the distances from C->D1 and C->D2, and are described as
         // c1 and c2. Then we may compensate/correct those distances with actual
-        // ground elevations, which is done by simply offseting camera altitude, as it is
+        // ground elevations, which is done by simply offsetting camera altitude, as it is
         // opposite to elevating ground level.
         const halfPiLimit = Math.PI / 2 - epsilon;
-        const cameraAltitude = this.getCameraAltitude(mapView.camera, mapView.projection);
+        const cameraAltitude = this.getCameraAltitude(camera, projection);
         const target = Utils_1.MapViewUtils.rayCastWorldCoordinates(mapView, 0, 0);
         if (target === null) {
             throw new Error("MapView does not support a view pointing in the void.");
         }
-        const cameraTilt = Utils_1.MapViewUtils.extractSphericalCoordinatesFromLocation(mapView, mapView.camera, mapView.projection.unprojectPoint(target)).tilt;
+        const cameraTilt = Utils_1.MapViewUtils.extractSphericalCoordinatesFromLocation(mapView, camera, projection.unprojectPoint(target)).tilt;
         // Angle between z and c2
         let topAngleRad;
         // Angle between z and c1
@@ -14978,8 +15433,8 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
         // Top plane origin altitude
         let z2;
         // For perspective projection:
-        if (mapView.camera.type === "PerspectiveCamera") {
-            const cam = mapView.camera;
+        if (camera.type === "PerspectiveCamera") {
+            const cam = camera;
             // Angle between z and c2, note, the fov is vertical, otherwise we would need to
             // translate it using aspect ratio:
             // let aspect = camera.aspect > 1 ? camera.aspect : 1 / camera.aspect;
@@ -14992,12 +15447,12 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
         }
         // For orthographic projection:
         else {
-            const cam = mapView.camera;
+            const cam = camera;
             // For orthogonal camera projections we may simply ignore FOV and use 0 for FOV
             // the top/bottom planes are simply parallel to the eye vector:
             topAngleRad = bottomAngleRad = cameraTilt;
             // Although the ray origin is not always the same (eye position) as for
-            // the perspective projections, thus we need to compensate for otrho-cube
+            // the perspective projections, thus we need to compensate for ortho-cube
             // dimensions:
             // sin(tilt) = zc2 / top
             // sin(tilt) = zc1 / bottom
@@ -15028,11 +15483,13 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
         // be defined as distance along the ground normal vector thus during camera
         // tilt they may affect near/far planes positions differently.
         const planesDist = this.getFrustumGroundIntersectionDist(mapView);
-        // Project cliping plane distances for the top/bottom frustum planes (edges), but
+        const camera = mapView.camera;
+        const projection = mapView.projection;
+        // Project clipping plane distances for the top/bottom frustum planes (edges), but
         // only if we deal with perspective camera type, this step is not required
         // for orthographic projections, cause all clip planes are parallel to eye vector.
-        if (mapView.camera.type === "PerspectiveCamera") {
-            const cam = mapView.camera;
+        if (camera.type === "PerspectiveCamera") {
+            const cam = camera;
             // Angle between z and c2, note, the fov is vertical, otherwise we would need to
             // translate it using aspect ratio:
             // let aspect = camera.aspect > 1 ? camera.aspect : 1 / camera.aspect;
@@ -15053,11 +15510,14 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
             viewRanges.far = planesDist.top;
         }
         // Clamp values to constraints.
-        const lookAtDist = this.getCameraLookAtDistance(mapView.camera, mapView.projection);
+        const lookAtDist = this.getCameraLookAtDistance(camera, projection);
         const farMax = lookAtDist * this.farMaxRatio;
-        viewRanges.near = Math.max(viewRanges.near - this.nearFarMargin / 2, this.nearMin);
+        viewRanges.near = Math.max(viewRanges.near, this.nearMin);
         viewRanges.far = Math.min(viewRanges.far, farMax);
-        viewRanges.far = Math.max(viewRanges.far + this.nearFarMargin / 2, viewRanges.near + this.nearFarMargin);
+        // Apply margins
+        const nearFarMargin = (this.nearFarMarginRatio * (viewRanges.near + viewRanges.far)) / 2;
+        viewRanges.near = Math.max(viewRanges.near - nearFarMargin / 2, this.nearMin);
+        viewRanges.far = Math.max(viewRanges.far + nearFarMargin / 2, viewRanges.near + nearFarMargin);
         viewRanges.minimum = this.nearMin;
         viewRanges.maximum = farMax;
         return viewRanges;
@@ -15065,12 +15525,12 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
     evaluateSphericalProj(camera, projection) {
         harp_utils_1.assert(projection.type === harp_geoutils_1.ProjectionType.Spherical);
         const viewRanges = Object.assign({}, this.minimumViewRange);
-        // Near plance calculus is pretty straightforward and does not depent on camera tilt:
+        // Near plane calculus is pretty straightforward and does not depend on camera tilt:
         const cameraAltitude = this.getCameraAltitude(camera, projection);
         viewRanges.near = cameraAltitude - this.maxElevation;
         if (camera instanceof THREE.PerspectiveCamera) {
             // Now we need to account for camera tilt and frustum volume, so the longest
-            // frustum edge does not instersects with sphere, it takes the worst case
+            // frustum edge does not intersects with sphere, it takes the worst case
             // scenario regardless of camera tilt, so may be improved little bit with more
             // sophisticated algorithm.
             // Note, the fov is vertical, otherwise we would need to
@@ -15089,7 +15549,7 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
         camera.matrixWorld.extractBasis(this.m_tmpVectors[0], this.m_tmpVectors[1], this.m_tmpVectors[2]);
         const xaxis = this.m_tmpVectors[0];
         const yaxis = this.m_tmpVectors[1];
-        // Extend the far plane by the margin along the shpere normal (radius).
+        // Extend the far plane by the margin along the sphere normal (radius).
         // In order to calculate far plane distance we need to find sphere tangent
         // line that passes thru camera position, method explanation may be found in
         // TopViewClipPlanesEvaluator.evaluateDistanceSphericalProj() method.
@@ -15102,7 +15562,7 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
         // Apply tangent vector length onto camera to origin vector.
         let td;
         // There may be situations when maximum elevation remains below sea level (< 0), or
-        // is neglible, in such cases simply apply tangent distance to camera to origin vector.
+        // is negligible, in such cases simply apply tangent distance to camera to origin vector.
         if (this.maxElevation < epsilon) {
             // This may be calculated by several methods, firstly:
             // t_d = d_norm * |t|,
@@ -15112,7 +15572,7 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
             // By simplifying t_d equation with the second condition, we get:
             // t_d = d_norm * cos(alpha) * |d|, where d = d_norm * |d|
             // t_d = d * cos(alpha)
-            // Cause cameraToOrigin is no longer needed re-use it to calulate td.
+            // Cause cameraToOrigin is no longer needed re-use it to calculate td.
             td = cameraToOrigin.multiplyScalar(cosAlpha);
         }
         // Second case takes into account the elevation above the ground.
@@ -15123,12 +15583,10 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
             // t_d = d_norm * |t + te|,
             // where:
             // |t| = cos(alpha) * |d|
-            // |te| = sqrt((r+e)^2 - r^2)
-            // Which reduces to:
-            // |te| = sqrt(2*r*e + e^2)
+            // |te| = sqrt((r+e)^2 - r^2) = sqrt(2*r*e + e^2)
             const t = cosAlpha * d;
             const te = Math.sqrt(2 * r * this.maxElevation - this.maxElevation * this.maxElevation);
-            // Re-use prealocated vector.
+            // Re-use pre-allocated vector.
             td = cameraToOrigin.copy(dNorm).multiplyScalar(t + te);
         }
         // For tangent, oriented in the direction to origin, we then apply
@@ -15143,23 +15601,27 @@ class TiltViewClipPlanesEvaluator extends TopViewClipPlanesEvaluator {
         // Cause td vector in no longer needed, reuse it applying quaternion to it.
         const tdrx2 = td.applyQuaternion(rx2);
         // Rotated tangents are then added to camera position thus defining far plane
-        // position and orientation - it is enough to have three cooplanar points to
+        // position and orientation - it is enough to have three co-planar points to
         // define the plane.
         // p1 = camera.position + tdrx
         // p2 = camera.position + tdry
         // p3 = camera.position + tdrx2
         // const farPlane = new THREE.Plane().setFromCoplanarPoints(p1, p2, p3);
         // viewRanges.far = farPlane.distanceToPoint(camera.position);
-        // This of course may be simplified by moving calculus entirelly to camera space,
+        // This of course may be simplified by moving calculus entirely to camera space,
         // because far plane is indeed defined in that space anyway:
         const farPlane = this.m_tmpPlane.setFromCoplanarPoints(tdrx, tdry, tdrx2);
         viewRanges.far = farPlane.constant;
-        // Finally apply the constraints.
-        viewRanges.near = Math.max(viewRanges.near - this.nearFarMargin / 2, this.nearMin);
-        // Take into account largest depression assumed, that may be further then
+        // Take into account largest depression assumed, that may be further than
         // tangent based far plane distance.
-        viewRanges.far = Math.max(viewRanges.far, cameraAltitude - this.minElevation);
-        viewRanges.far = Math.max(viewRanges.far + this.nearFarMargin / 2, viewRanges.near + this.nearFarMargin);
+        const farMin = cameraAltitude - this.minElevation;
+        // Finally apply the constraints.
+        viewRanges.near = Math.max(viewRanges.near, this.nearMin);
+        viewRanges.far = Math.max(viewRanges.far, farMin);
+        // Apply margins
+        const nearFarMargin = (this.nearFarMarginRatio * (viewRanges.near + viewRanges.far)) / 2;
+        viewRanges.near = Math.max(viewRanges.near - nearFarMargin / 2, this.nearMin);
+        viewRanges.far = Math.max(viewRanges.far + nearFarMargin / 2, viewRanges.near + nearFarMargin);
         viewRanges.minimum = this.nearMin;
         viewRanges.maximum = viewRanges.far;
         return viewRanges;
@@ -15223,10 +15685,12 @@ class FixedClipPlanesEvaluator {
 }
 exports.FixedClipPlanesEvaluator = FixedClipPlanesEvaluator;
 /**
- * Default [[ClipPlanesEvaluator]] calculates near plane based on ground distance.
+ * Factory function that creates default [[ClipPlanesEvaluator]] that calculates near plane based
+ * on ground distance and camera orientation.
+ *
+ * Creates [[TiltViewClipPlanesEvaluator]].
  */
-// tslint:disable-next-line: max-line-length
-exports.defaultClipPlanesEvaluator = new InterpolatedClipPlanesEvaluator();
+exports.createDefaultClipPlanesEvaluator = () => new TiltViewClipPlanesEvaluator();
 
 
 /***/ }),
@@ -15521,7 +15985,7 @@ exports.isLoggingMessage = isLoggingMessage;
 /**
  * The default number of Web Workers to use if `navigator.hardwareConcurrency` is unavailable.
  */
-const DEFAULT_WORKER_COUNT = 4;
+const DEFAULT_WORKER_COUNT = 2;
 /**
  * The default timeout for first message from worker.
  *
@@ -15687,7 +16151,7 @@ class ConcurrentWorkerSet {
         }
         this.m_workerCount = harp_utils_1.getOptionValue(this.m_options.workerCount, typeof navigator !== "undefined" && navigator.hardwareConcurrency !== undefined
             ? // We need to have at least one worker
-                THREE.Math.clamp(navigator.hardwareConcurrency - 1, 1, 4)
+                THREE.Math.clamp(navigator.hardwareConcurrency - 1, 1, 2)
             : undefined, DEFAULT_WORKER_COUNT);
         // Initialize the workers. The workers now have an ID to identify specific workers and
         // handle their busy state.
@@ -16102,6 +16566,13 @@ class DataSource extends THREE.EventDispatcher {
          */
         this.useGeometryLoader = false;
         /**
+         * Whether the datasource should have a ground plane (this plane covers the tile entirely and
+         * has the minimum possible renderOrder), this can be required in some cases when fallback
+         * parent tiles need to be covered by the children, otherwise the content will overlap.
+         * Default is false
+         */
+        this.addGroundPlane = false;
+        /**
          * Minimum zoom level this `DataSource` can be displayed in.
          */
         this.m_minZoomLevel = 1;
@@ -16109,6 +16580,10 @@ class DataSource extends THREE.EventDispatcher {
          * Maximum zoom level this `DataSource` can be displayed in.
          */
         this.m_maxZoomLevel = 20;
+        /**
+         * Current value of [[maxGeometryHeight]] property.
+         */
+        this.m_maxGeometryHeight = 0;
         /**
          * Storage level offset applied to this `DataSource`.
          */
@@ -16284,6 +16759,19 @@ class DataSource extends THREE.EventDispatcher {
     }
     set maxZoomLevel(level) {
         this.m_maxZoomLevel = level;
+    }
+    /**
+     * Maximum geometry height above ground level this `DataSource` can produce.
+     *
+     * Used in first stage of frustum culling before [[Tile.maxGeometryHeight]] data is available.
+     *
+     * @default 0.
+     */
+    get maxGeometryHeight() {
+        return this.m_maxGeometryHeight;
+    }
+    set maxGeometryHeight(value) {
+        this.m_maxGeometryHeight = value;
     }
     /**
      * The difference between storage level and display level of tile.
@@ -16685,13 +17173,7 @@ function createMaterial(options, textureReadyCallback) {
                 // skip reserved property names
                 return;
             }
-            const m = material;
-            if (m[prop] instanceof THREE.Color) {
-                m[prop].set(params[prop]);
-            }
-            else {
-                m[prop] = params[prop];
-            }
+            applyTechniquePropertyToMaterial(material, prop, params[prop]);
         });
     }
     else {
@@ -16741,8 +17223,8 @@ function getObjectConstructor(technique) {
         case "terrain":
         case "extruded-polygon":
         case "fill":
-        case "solid-line":
         case "dashed-line":
+        case "solid-line":
             return THREE.Mesh;
         case "circles":
             return MapViewPoints_1.Circles;
@@ -16780,15 +17262,7 @@ exports.getObjectConstructor = getObjectConstructor;
 /**
  * Non material properties of [[BaseTechnique]]
  */
-exports.BASE_TECHNIQUE_NON_MATERIAL_PROPS = [
-    "name",
-    "id",
-    "renderOrder",
-    "renderOrderBiasProperty",
-    "renderOrderBiasGroup",
-    "renderOrderBiasRange",
-    "transient"
-];
+exports.BASE_TECHNIQUE_NON_MATERIAL_PROPS = ["name", "id", "renderOrder", "transient"];
 /**
  * Returns a [[MaterialConstructor]] basing on provided technique object.
  *
@@ -16810,10 +17284,9 @@ function getMaterialConstructor(technique) {
         case "terrain":
         case "extruded-polygon":
             return harp_materials_1.MapMeshStandardMaterial;
+        case "dashed-line":
         case "solid-line":
             return harp_materials_1.SolidLineMaterial;
-        case "dashed-line":
-            return harp_materials_1.DashedLineMaterial;
         case "fill":
             return harp_materials_1.MapMeshBasicMaterial;
         case "squares":
@@ -16859,23 +17332,44 @@ function applyTechniqueToMaterial(technique, material, level, skipExtraProps) {
         }
         const prop = propertyName;
         const m = material;
-        let value = technique[prop];
         if (typeof m[prop] === "undefined") {
             return;
         }
+        let value = technique[prop];
         if (level !== undefined && harp_datasource_protocol_1.isInterpolatedProperty(value)) {
             value = harp_datasource_protocol_1.getPropertyValue(value, level);
         }
-        if (m[prop] instanceof THREE.Color) {
-            m[prop].set(value);
-            m[prop] = m[prop]; // Trigger setter
-        }
-        else {
-            m[prop] = value;
-        }
+        applyTechniquePropertyToMaterial(material, prop, value);
     });
 }
 exports.applyTechniqueToMaterial = applyTechniqueToMaterial;
+/**
+ * Apply single and generic technique property to corresponding material parameter.
+ *
+ * @note Special handling for material parameters of `THREE.Color` type is provided thus it
+ * does not provide constructor that would take [[string]] or [[number]] values.
+ *
+ * @param material target material
+ * @param prop material parameter name (or index)
+ * @param value corresponding technique property value which is applied.
+ */
+function applyTechniquePropertyToMaterial(material, prop, value) {
+    const m = material;
+    if (m[prop] instanceof THREE.Color) {
+        if (typeof value === "string") {
+            value = harp_datasource_protocol_1.parseStringEncodedColor(value);
+            if (value === undefined) {
+                throw new Error(`Unsupported color format: '${value}'`);
+            }
+        }
+        m[prop].set(value);
+        // Trigger setter notifying change
+        m[prop] = m[prop];
+    }
+    else {
+        m[prop] = value;
+    }
+}
 function getTextureBuffer(buffer, textureDataType) {
     if (textureDataType === undefined) {
         return new Uint8Array(buffer);
@@ -16994,18 +17488,18 @@ function createDepthPrePassMesh(mesh) {
         throw new Error("#createDepthPassMesh position attribute not found");
     }
     const depthPassGeometry = new THREE.BufferGeometry();
-    depthPassGeometry.addAttribute("position", positionAttribute);
+    depthPassGeometry.setAttribute("position", positionAttribute);
     const uvAttribute = originalGeometry.getAttribute("uv");
     if (uvAttribute) {
-        depthPassGeometry.addAttribute("uv", uvAttribute);
+        depthPassGeometry.setAttribute("uv", uvAttribute);
     }
     const normalAttribute = originalGeometry.getAttribute("normal");
     if (normalAttribute) {
-        depthPassGeometry.addAttribute("normal", normalAttribute);
+        depthPassGeometry.setAttribute("normal", normalAttribute);
     }
     const extrusionAxisAttribute = originalGeometry.getAttribute("extrusionAxis");
     if (extrusionAxisAttribute) {
-        depthPassGeometry.addAttribute("extrusionAxis", extrusionAxisAttribute);
+        depthPassGeometry.setAttribute("extrusionAxis", extrusionAxisAttribute);
     }
     if (originalGeometry.index) {
         depthPassGeometry.setIndex(originalGeometry.index);
@@ -17482,6 +17976,12 @@ exports.MapTileCuller = MapTileCuller;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+const harp_datasource_protocol_1 = __webpack_require__(/*! @here/harp-datasource-protocol */ "../harp-datasource-protocol/index.ts");
 const harp_geoutils_1 = __webpack_require__(/*! @here/harp-geoutils */ "../harp-geoutils/index.ts");
 const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
 const THREE = __webpack_require__(/*! three */ "three");
@@ -17506,14 +18006,22 @@ const ScreenCollisions_1 = __webpack_require__(/*! ./ScreenCollisions */ "../har
 const ScreenProjector_1 = __webpack_require__(/*! ./ScreenProjector */ "../harp-mapview/lib/ScreenProjector.ts");
 const SkyBackground_1 = __webpack_require__(/*! ./SkyBackground */ "../harp-mapview/lib/SkyBackground.ts");
 const Statistics_1 = __webpack_require__(/*! ./Statistics */ "../harp-mapview/lib/Statistics.ts");
+const MapViewState_1 = __webpack_require__(/*! ./text/MapViewState */ "../harp-mapview/lib/text/MapViewState.ts");
 const TextElementsRenderer_1 = __webpack_require__(/*! ./text/TextElementsRenderer */ "../harp-mapview/lib/text/TextElementsRenderer.ts");
-const TextStyleCache_1 = __webpack_require__(/*! ./text/TextStyleCache */ "../harp-mapview/lib/text/TextStyleCache.ts");
 const ThemeHelpers_1 = __webpack_require__(/*! ./ThemeHelpers */ "../harp-mapview/lib/ThemeHelpers.ts");
 const ThemeLoader_1 = __webpack_require__(/*! ./ThemeLoader */ "../harp-mapview/lib/ThemeLoader.ts");
 const Utils_1 = __webpack_require__(/*! ./Utils */ "../harp-mapview/lib/Utils.ts");
 const VisibleTileSet_1 = __webpack_require__(/*! ./VisibleTileSet */ "../harp-mapview/lib/VisibleTileSet.ts");
-// cache value, because access to process.env.NODE_ENV is SLOW!
+// Cache value, because access to process.env.NODE_ENV is SLOW!
 const isProduction = "development" === "production";
+if (isProduction) {
+    // In production: silence logging below error.
+    harp_utils_1.LoggerManager.instance.setLogLevelForAll(harp_utils_1.LogLevel.Error);
+}
+else {
+    // In dev: silence logging below log (silences "debug" and "trace" levels).
+    harp_utils_1.LoggerManager.instance.setLogLevelForAll(harp_utils_1.LogLevel.Log);
+}
 var MapViewEventNames;
 (function (MapViewEventNames) {
     /** Called before this `MapView` starts to render a new frame. */
@@ -17550,13 +18058,14 @@ var MapViewEventNames;
     MapViewEventNames["CameraPositionChanged"] = "camera-changed";
 })(MapViewEventNames = exports.MapViewEventNames || (exports.MapViewEventNames = {}));
 const logger = harp_utils_1.LoggerManager.instance.create("MapView");
-const DEFAULT_FONT_CATALOG = "./resources/fonts/Default_FontCatalog.json";
 const DEFAULT_CLEAR_COLOR = 0xefe9e1;
 const DEFAULT_FOV_CALCULATION = { type: "dynamic", fov: 40 };
 const DEFAULT_CAM_NEAR_PLANE = 0.1;
 const DEFAULT_CAM_FAR_PLANE = 4000000;
 const MAX_FIELD_OF_VIEW = 140;
 const MIN_FIELD_OF_VIEW = 10;
+// All objects in fallback tiles are reduced by this amount.
+exports.FALLBACK_RENDER_ORDER_OFFSET = 20000;
 const DEFAULT_MIN_ZOOM_LEVEL = 1;
 /**
  * Default maximum zoom level.
@@ -17619,7 +18128,6 @@ var MapViewPowerPreference;
  */
 exports.MapViewDefaults = {
     projection: harp_geoutils_1.mercatorProjection,
-    clipPlanesEvaluator: ClipPlanesEvaluator_1.defaultClipPlanesEvaluator,
     maxVisibleDataSourceTiles: 120,
     extendedFrustumCulling: true,
     tileCacheSize: 200,
@@ -17642,15 +18150,8 @@ class MapView extends THREE.EventDispatcher {
      */
     constructor(options) {
         super();
-        /**
-         * The string of the default font catalog to use for labelling.
-         */
-        this.defaultFontCatalog = DEFAULT_FONT_CATALOG;
         this.dumpNext = false;
-        /**
-         * Allows discarding the text rendering after the map rendering.
-         */
-        this.renderLabels = true;
+        this.m_renderLabels = true;
         this.m_screenCollisions = new ScreenCollisions_1.ScreenCollisions();
         this.m_visibleTileSetLock = false;
         this.m_tileWrappingEnabled = true;
@@ -17682,9 +18183,6 @@ class MapView extends THREE.EventDispatcher {
         this.m_frameNumber = 0;
         this.m_maxFps = 0;
         this.m_detectedFps = FALLBACK_FRAME_RATE;
-        this.m_textRenderStyleCache = new TextStyleCache_1.TextRenderStyleCache();
-        this.m_textLayoutStyleCache = new TextStyleCache_1.TextLayoutStyleCache();
-        this.m_overlayTextElements = [];
         this.m_forceCameraAspect = undefined;
         //
         // sources
@@ -17701,6 +18199,7 @@ class MapView extends THREE.EventDispatcher {
         this.m_themeIsLoading = false;
         this.m_firstFrameRendered = false;
         this.m_firstFrameComplete = false;
+        this.m_initialTextPlacementDone = false;
         this.m_frameTimeIndex = 0;
         this.m_frameTimeRing = [];
         this.m_imageCache = new MapViewImageCache_1.MapViewImageCache(this);
@@ -17715,7 +18214,7 @@ class MapView extends THREE.EventDispatcher {
          */
         this.onWebGLContextLost = (event) => {
             this.dispatchEvent(CONTEXT_LOST_EVENT);
-            logger.log("WebGL context lost", event);
+            logger.warn("WebGL context lost", event);
         };
         /**
          * Default handler for webglcontextrestored event.
@@ -17733,10 +18232,11 @@ class MapView extends THREE.EventDispatcher {
                 }
                 this.update();
             }
-            logger.log("WebGL context restored", event);
+            logger.warn("WebGL context restored", event);
         };
         // make a copy to avoid unwanted changes to the original options.
         this.m_options = Object.assign({}, options);
+        this.m_uriResolver = this.m_options.uriResolver;
         if (this.m_options.minZoomLevel !== undefined) {
             this.m_minZoomLevel = this.m_options.minZoomLevel;
         }
@@ -17746,21 +18246,19 @@ class MapView extends THREE.EventDispatcher {
         if (this.m_options.minCameraHeight !== undefined) {
             this.m_minCameraHeight = this.m_options.minCameraHeight;
         }
-        if (this.m_options.fontCatalog !== undefined) {
-            this.defaultFontCatalog = this.m_options.fontCatalog;
-        }
         if (this.m_options.decoderUrl !== undefined) {
-            ConcurrentDecoderFacade_1.ConcurrentDecoderFacade.defaultScriptUrl = this.m_options.decoderUrl;
+            ConcurrentDecoderFacade_1.ConcurrentDecoderFacade.defaultScriptUrl = this.m_uriResolver
+                ? this.m_uriResolver.resolveUri(this.m_options.decoderUrl)
+                : this.m_options.decoderUrl;
         }
         if (this.m_options.decoderCount !== undefined) {
             ConcurrentDecoderFacade_1.ConcurrentDecoderFacade.defaultWorkerCount = this.m_options.decoderCount;
         }
-        this.m_visibleTileSetOptions = Object.assign({}, exports.MapViewDefaults);
+        this.m_visibleTileSetOptions = Object.assign(Object.assign({}, exports.MapViewDefaults), { clipPlanesEvaluator: options.clipPlanesEvaluator !== undefined
+                ? options.clipPlanesEvaluator
+                : ClipPlanesEvaluator_1.createDefaultClipPlanesEvaluator() });
         if (options.projection !== undefined) {
             this.m_visibleTileSetOptions.projection = options.projection;
-        }
-        if (options.clipPlanesEvaluator !== undefined) {
-            this.m_visibleTileSetOptions.clipPlanesEvaluator = options.clipPlanesEvaluator;
         }
         if (options.extendedFrustumCulling !== undefined) {
             this.m_visibleTileSetOptions.extendedFrustumCulling = options.extendedFrustumCulling;
@@ -17819,6 +18317,10 @@ class MapView extends THREE.EventDispatcher {
                 : this.m_options.powerPreference
         });
         this.m_renderer.autoClear = false;
+        // This is a bit of a misnomer, this is required for the clipping planes
+        // to be enabled, and they are in world space, see:
+        // https://threejs.org/docs/#api/en/materials/Material.clippingPlanes
+        this.m_renderer.localClippingEnabled = true;
         // This is detailed at https://threejs.org/docs/#api/renderers/WebGLRenderer.info
         // When using several WebGLRenderer#render calls per frame, it is the only way to get
         // correct rendering data from ThreeJS.
@@ -17864,7 +18366,21 @@ class MapView extends THREE.EventDispatcher {
             this.m_backgroundDataSource.setTilingScheme(options.backgroundTilingScheme);
         }
         this.initTheme();
+        this.m_textElementsRenderer = this.createTextRenderer();
         this.drawFrame();
+    }
+    /**
+     * @returns Whether label rendering is enabled.
+     */
+    get renderLabels() {
+        return this.m_renderLabels;
+    }
+    /**
+     * Enables or disables rendering of labels.
+     * @param value `true` to enable labels `false` to disable them.
+     */
+    set renderLabels(value) {
+        this.m_renderLabels = value;
     }
     /**
      * @hidden
@@ -17872,20 +18388,6 @@ class MapView extends THREE.EventDispatcher {
      */
     get textElementsRenderer() {
         return this.m_textElementsRenderer;
-    }
-    /**
-     * @hidden
-     * The [[TextRenderStyleCache]] used for this instance of `MapView`.
-     */
-    get textRenderStyleCache() {
-        return this.m_textRenderStyleCache;
-    }
-    /**
-     * @hidden
-     * The [[TextLayoutStyleCache]] used for this instance of `MapView`.
-     */
-    get textLayoutStyleCache() {
-        return this.m_textLayoutStyleCache;
     }
     /**
      * @hidden
@@ -17923,10 +18425,6 @@ class MapView extends THREE.EventDispatcher {
         if (this.m_movementFinishedUpdateTimerId) {
             clearTimeout(this.m_movementFinishedUpdateTimerId);
             this.m_movementFinishedUpdateTimerId = undefined;
-        }
-        if (this.m_textElementsRendererTimer !== undefined) {
-            clearTimeout(this.m_textElementsRendererTimer);
-            this.m_textElementsRendererTimer = undefined;
         }
         if (this.m_animationFrameHandle !== undefined) {
             cancelAnimationFrame(this.m_animationFrameHandle);
@@ -17970,9 +18468,7 @@ class MapView extends THREE.EventDispatcher {
         this.m_visibleTiles.setNumberOfVisibleTiles(Math.floor(numVisibleTiles));
         this.updateImages();
         this.updateLighting();
-        if (this.m_textElementsRenderer) {
-            this.m_textElementsRenderer.placeAllTileLabels();
-        }
+        this.m_textElementsRenderer.invalidateCache();
         this.updateSkyBackground();
         this.update();
     }
@@ -18051,7 +18547,7 @@ class MapView extends THREE.EventDispatcher {
         if (!ThemeLoader_1.ThemeLoader.isThemeLoaded(theme)) {
             this.m_themeIsLoading = true;
             // If theme is not yet loaded, let's set theme asynchronously
-            ThemeLoader_1.ThemeLoader.load(theme)
+            ThemeLoader_1.ThemeLoader.load(theme, { uriResolver: this.m_uriResolver })
                 .then(loadedTheme => {
                 this.m_themeIsLoading = false;
                 this.theme = loadedTheme;
@@ -18083,8 +18579,6 @@ class MapView extends THREE.EventDispatcher {
         this.m_theme.textStyles = theme.textStyles;
         this.m_theme.defaultTextStyle = theme.defaultTextStyle;
         this.m_theme.fontCatalogs = theme.fontCatalogs;
-        this.m_textRenderStyleCache.clear();
-        this.m_textLayoutStyleCache.clear();
         this.resetTextRenderer();
         if (this.m_theme.styles === undefined) {
             this.m_theme.styles = {};
@@ -18099,6 +18593,13 @@ class MapView extends THREE.EventDispatcher {
         }
         this.dispatchEvent(THEME_LOADED_EVENT);
         this.update();
+    }
+    /**
+     * [[UriResolver]] used to resolve application/deployment specific `URI`s into actual `URLs`
+     * that can be loaded with `fetch`.
+     */
+    get uriResolver() {
+        return this.m_uriResolver;
     }
     /**
      * Gets the value of the forced custom camera aspect.
@@ -18149,10 +18650,10 @@ class MapView extends THREE.EventDispatcher {
      * `false`.
      */
     set disableFading(disable) {
-        this.m_options.disableFading = disable;
+        this.m_textElementsRenderer.disableFading = disable;
     }
     get disableFading() {
-        return this.m_options.disableFading === true;
+        return this.m_textElementsRenderer.disableFading;
     }
     /**
      * @hidden
@@ -18240,12 +18741,12 @@ class MapView extends THREE.EventDispatcher {
         const targetDistance = this.camera.position.distanceTo(target);
         const attitude = Utils_1.MapViewUtils.extractAttitude(this, this.camera);
         const pitchDeg = THREE.Math.radToDeg(attitude.pitch);
-        const yawDeg = THREE.Math.radToDeg(attitude.yaw);
+        const azimuthDeg = -THREE.Math.radToDeg(attitude.yaw);
         this.m_visibleTileSetOptions.projection = projection;
         this.updatePolarDataSource();
         this.clearTileCache();
         this.m_visibleTiles = new VisibleTileSet_1.VisibleTileSet(new FrustumIntersection_1.FrustumIntersection(this.m_camera, this, this.m_visibleTileSetOptions.extendedFrustumCulling, this.m_tileWrappingEnabled), this.m_tileGeometryManager, this.m_visibleTileSetOptions);
-        this.lookAt(targetCoordinates, targetDistance, pitchDeg, yawDeg);
+        this.lookAt(targetCoordinates, targetDistance, pitchDeg, azimuthDeg);
     }
     /**
      * Get camera clipping planes evaluator used.
@@ -18274,13 +18775,13 @@ class MapView extends THREE.EventDispatcher {
     /**
      * Get object describing frustum planes distances and min/max visibility range for actual
      * camera setup.
-     * Near and far plance distance are self explanatory while minimum and maximum visibility range
+     * Near and far plane distance are self explanatory while minimum and maximum visibility range
      * describes the extreme near/far planes distances that may be achieved with current camera
      * settings, meaning at current zoom level (ground distance) and any possible orientation.
      * @note Visibility is directly related to camera [[ClipPlaneEvaluator]] used and determines
      * the maximum possible distance of camera far clipping plane regardless of tilt, but may change
-     * whenever zoom level changes. Distance is meassured in world units which may be approximately
-     * euqal to meters, but this depends on the distortion related to projection type used.
+     * whenever zoom level changes. Distance is measured in world units which may be approximately
+     * equal to meters, but this depends on the distortion related to projection type used.
      */
     get viewRanges() {
         return this.m_viewRanges;
@@ -18476,6 +18977,7 @@ class MapView extends THREE.EventDispatcher {
             throw new Error(`A DataSource with the name "${dataSource.name}" already exists in this MapView.`);
         }
         dataSource.attach(this);
+        dataSource.setEnableElevationOverlay(this.m_elevationProvider !== undefined);
         this.m_tileDataSources.push(dataSource);
         if (this.m_backgroundDataSource) {
             this.m_backgroundDataSource.updateStorageLevelOffset();
@@ -18553,11 +19055,7 @@ class MapView extends THREE.EventDispatcher {
      * @param textElements Array of [[TextElement]] to be added.
      */
     addOverlayText(textElements) {
-        if (this.m_overlayTextElements !== undefined) {
-            this.m_overlayTextElements = this.m_overlayTextElements.concat(textElements);
-        }
-        this.createTextRendererIfNeeded();
-        this.m_textElementsRenderer.placeAllTileLabels();
+        this.m_textElementsRenderer.addOverlayText(textElements);
         this.update();
     }
     /**
@@ -18566,7 +19064,7 @@ class MapView extends THREE.EventDispatcher {
      * @param textElements Array of [[TextElement]] to be added.
      */
     clearOverlayText() {
-        this.m_overlayTextElements = [];
+        this.m_textElementsRenderer.clearOverlayText();
     }
     /**
      * The method that sets the camera to the desired angle (`tiltDeg`) and `distance` (in meters)
@@ -18609,8 +19107,8 @@ class MapView extends THREE.EventDispatcher {
             const maxPitchDegWithCurvature = THREE.Math.radToDeg(maxPitchRadWithCurvature);
             limitedPitch = Math.min(limitedPitch, maxPitchDegWithCurvature);
         }
-        Utils_1.MapViewUtils.setRotation(this, yawDeg, limitedPitch);
         Utils_1.MapViewUtils.zoomOnTargetPosition(this, 0, 0, zoomLevel);
+        Utils_1.MapViewUtils.setRotation(this, yawDeg, limitedPitch);
         this.update();
     }
     /**
@@ -18654,7 +19152,10 @@ class MapView extends THREE.EventDispatcher {
      * Returns `true` if the current frame will immediately be followed by another frame.
      */
     get isDynamicFrame() {
-        return this.cameraIsMoving || this.animating || this.m_updatePending;
+        return (this.cameraIsMoving ||
+            this.animating ||
+            this.m_updatePending ||
+            this.m_animatedExtrusionHandler.isAnimating);
     }
     /**
      * Returns the ratio between a pixel and a world unit for the current camera (in the center of
@@ -19052,15 +19553,18 @@ class MapView extends THREE.EventDispatcher {
             this.m_forceCameraAspect !== undefined ? this.m_forceCameraAspect : width / height;
         this.setFovOnCamera(this.m_options.fovCalculation, height);
         // When calculating clip planes account for the highest building on the earth,
-        // multipling its height by projection scalling factor. This approach assumes
+        // multiplying its height by projection scaling factor. This approach assumes
         // constantHeight property of extruded polygon technique is set as default false,
         // otherwise the near plane margins will be bigger then required, but still correct.
         const projectionScale = this.projection.getScaleFactor(this.camera.position);
-        const maxHeight = harp_geoutils_1.EarthConstants.MAX_BUILDING_HEIGHT * projectionScale;
+        const maxGeometryHeightScaled = projectionScale *
+            this.m_tileDataSources.reduce((r, ds) => Math.max(r, ds.maxGeometryHeight), 0);
         // Copy all properties from new view ranges to our readonly object.
         // This allows to keep all view ranges references valid and keeps up-to-date
         // information within them. Works the same as copping all properties one-by-one.
-        Object.assign(this.m_viewRanges, viewRanges === undefined ? this.m_visibleTiles.updateClipPlanes(maxHeight) : viewRanges);
+        Object.assign(this.m_viewRanges, viewRanges === undefined
+            ? this.m_visibleTiles.updateClipPlanes(maxGeometryHeightScaled)
+            : viewRanges);
         this.m_camera.near = this.m_viewRanges.near;
         this.m_camera.far = this.m_viewRanges.far;
         this.m_camera.updateProjectionMatrix();
@@ -19245,17 +19749,10 @@ class MapView extends THREE.EventDispatcher {
             cullTime = harp_utils_1.PerformanceTimer.now();
         }
         const renderList = this.m_visibleTiles.dataSourceTileList;
-        const hasTextRenderer = this.m_textElementsRenderer !== undefined;
-        let hasTextToRender = this.m_overlayTextElements !== undefined && this.m_overlayTextElements.length > 0;
         // no need to check everything if we're not going to create text renderer.
-        let needsTileCheck = !hasTextToRender && !hasTextRenderer && this.renderLabels;
         renderList.forEach(({ zoomLevel, renderedTiles }) => {
             renderedTiles.forEach(tile => {
                 this.renderTileObjects(tile, zoomLevel);
-                if (needsTileCheck && tile.hasTextElements()) {
-                    needsTileCheck = false;
-                    hasTextToRender = true;
-                }
                 //We know that rendered tiles are visible (in the view frustum), so we update the
                 //frame number, note we don't do this for the visibleTiles because some may still be
                 //loading (and therefore aren't visible in the sense of being seen on the screen).
@@ -19264,8 +19761,19 @@ class MapView extends THREE.EventDispatcher {
                 tile.frameNumLastVisible = this.m_frameNumber;
             });
         });
-        if (hasTextToRender && !hasTextRenderer && this.renderLabels) {
-            this.enqueueTextRendererCreation();
+        // Check if this is the time to place the labels for the first time. Pretty much everything
+        // should have been loaded, and no animation should be running.
+        if (!this.m_initialTextPlacementDone &&
+            !this.m_firstFrameComplete &&
+            !this.isDynamicFrame &&
+            !this.m_themeIsLoading &&
+            this.m_poiTableManager.finishedLoading &&
+            this.m_visibleTiles.allVisibleTilesLoaded &&
+            this.m_connectedDataSources.size + this.m_failedDataSources.size ===
+                this.m_tileDataSources.length &&
+            !this.m_textElementsRenderer.initializing &&
+            !this.m_textElementsRenderer.loading) {
+            this.m_initialTextPlacementDone = true;
         }
         this.m_mapAnchors.children.forEach((childObject) => {
             if (childObject.geoPosition === undefined) {
@@ -19330,26 +19838,6 @@ class MapView extends THREE.EventDispatcher {
             FIRST_FRAME_EVENT.time = time;
             this.dispatchEvent(FIRST_FRAME_EVENT);
         }
-        if (!this.m_firstFrameComplete &&
-            !this.m_themeIsLoading &&
-            this.m_visibleTiles.allVisibleTilesLoaded &&
-            this.m_connectedDataSources.size + this.m_failedDataSources.size ===
-                this.m_tileDataSources.length &&
-            !this.m_updatePending &&
-            !this.animating &&
-            !this.cameraIsMoving &&
-            !this.m_animatedExtrusionHandler.isAnimating &&
-            (this.m_textElementsRenderer !== undefined
-                ? !this.m_textElementsRenderer.loading
-                : true) &&
-            this.m_poiTableManager.finishedLoading) {
-            this.m_firstFrameComplete = true;
-            if (gatherStatistics) {
-                stats.appResults.set("firstFrameComplete", time);
-            }
-            FRAME_COMPLETE_EVENT.time = time;
-            this.dispatchEvent(FRAME_COMPLETE_EVENT);
-        }
         this.m_visibleTiles.disposePendingTiles();
         this.m_drawing = false;
         if (this.animating || this.m_updatePending) {
@@ -19369,9 +19857,24 @@ class MapView extends THREE.EventDispatcher {
         }
         DID_RENDER_EVENT.time = time;
         this.dispatchEvent(DID_RENDER_EVENT);
+        // After completely rendering this frame, it is checked if this frame was the first complete
+        // frame, with no more tiles, geometry and labels waiting to be added, and no animation
+        // running. The initial placement of text in this render call may have changed the loading
+        // state of the TextElementsRenderer, so this has to be checked again.
+        if (!this.m_firstFrameComplete &&
+            this.m_initialTextPlacementDone &&
+            !this.isDynamicFrame &&
+            !this.textElementsRenderer.loading) {
+            this.m_firstFrameComplete = true;
+            if (gatherStatistics) {
+                stats.appResults.set("firstFrameComplete", time);
+            }
+            FRAME_COMPLETE_EVENT.time = time;
+            this.dispatchEvent(FRAME_COMPLETE_EVENT);
+        }
     }
     renderTileObjects(tile, zoomLevel) {
-        const worldOffsetX = this.projection.worldExtent(0, 0).max.x * tile.offset;
+        const worldOffsetX = tile.computeWorldOffsetX();
         if (tile.willRender(zoomLevel)) {
             for (const object of tile.objects) {
                 object.position.copy(tile.center);
@@ -19384,6 +19887,28 @@ class MapView extends THREE.EventDispatcher {
                     object.setRotationFromMatrix(tile.boundingBox.getRotationMatrix());
                 }
                 object.frustumCulled = false;
+                if (object._backupRenderOrder === undefined) {
+                    object._backupRenderOrder = object.renderOrder;
+                }
+                const isBuilding = object.userData !== undefined &&
+                    object.userData.kind !== undefined &&
+                    object.userData.kind.includes(harp_datasource_protocol_1.GeometryKind.Building);
+                // When falling back to a parent tile (i.e. tile.levelOffset < 0) there will
+                // be overlaps with the already loaded tiles. Therefore all (flat) objects
+                // in a fallback tile must be shifted, such that their renderOrder is less
+                // than the groundPlane that each neighbouring Tile has (it has a renderOrder
+                // of -10000, see addGroundPlane in TileGeometryCreator), only then can we be
+                // sure that nothing of the parent will be rendered on top of the children,
+                // as such, we shift using the FALLBACK_RENDER_ORDER_OFFSET.
+                // This does not apply to buildings b/c they are 3d and the overlaps
+                // are resolved with a depth prepass. Note we set this always to ensure that if
+                // the Tile is used as a fallback, and then used normally, that we have the correct
+                // renderOrder.
+                object.renderOrder =
+                    object._backupRenderOrder +
+                        (!isBuilding && tile.levelOffset < 0
+                            ? exports.FALLBACK_RENDER_ORDER_OFFSET * tile.levelOffset
+                            : 0);
                 this.m_mapTilesRoot.add(object);
             }
         }
@@ -19394,29 +19919,16 @@ class MapView extends THREE.EventDispatcher {
         // orthographic camera that covers the entire available screen space. Unfortunately, this
         // particular camera set up is not compatible with the debug camera.
         const debugCameraActive = this.m_pointOfView !== undefined;
-        if (this.m_textElementsRenderer === undefined ||
-            !this.m_textElementsRenderer.ready ||
-            debugCameraActive) {
+        if (debugCameraActive) {
             return;
         }
-        if (this.checkIfTextElementsChanged() || this.checkIfTilesChanged()) {
-            this.m_textElementsRenderer.placeAllTileLabels();
-        }
-        // User TextElements have the priority when it comes to reserving screen space, so
-        // they are handled first. They will be rendered after the normal map objects and
-        // TextElements
-        this.m_textElementsRenderer.reset();
-        this.m_textElementsRenderer.prepopulateScreenWithBlockingElements();
-        this.m_textElementsRenderer.renderUserTextElements(time, this.m_frameNumber);
-        this.m_textElementsRenderer.renderAllTileText(time, this.m_frameNumber);
-        this.m_textElementsRenderer.renderOverlay(this.m_overlayTextElements);
-        this.m_textElementsRenderer.update();
+        this.m_textElementsRenderer.placeText(this.m_visibleTiles.dataSourceTileList, this.projection, time);
     }
     finishRenderTextElements() {
         const canRenderTextElements = this.m_pointOfView === undefined;
-        if (canRenderTextElements && this.m_textElementsRenderer !== undefined) {
+        if (canRenderTextElements) {
             // copy far value from scene camera, as the distance to the POIs matter now.
-            this.m_screenCamera.far = this.m_camera.far;
+            this.m_screenCamera.far = this.m_viewRanges.maximum;
             this.m_textElementsRenderer.renderText(this.m_screenCamera);
         }
     }
@@ -19426,7 +19938,7 @@ class MapView extends THREE.EventDispatcher {
         }
         this.m_themeIsLoading = true;
         Promise.resolve(this.m_options.theme)
-            .then(theme => ThemeLoader_1.ThemeLoader.load(theme))
+            .then(theme => ThemeLoader_1.ThemeLoader.load(theme, { uriResolver: this.m_uriResolver }))
             .then(theme => {
             this.m_themeIsLoading = false;
             this.theme = theme;
@@ -19514,7 +20026,7 @@ class MapView extends THREE.EventDispatcher {
             theme.lights.forEach((lightDescription) => {
                 const light = ThemeHelpers_1.createLight(lightDescription);
                 if (!light) {
-                    logger.log(
+                    logger.warn(
                     // tslint:disable-next-line: max-line-length
                     `MapView: failed to create light ${lightDescription.name} of type ${lightDescription.type}`);
                     return;
@@ -19525,16 +20037,12 @@ class MapView extends THREE.EventDispatcher {
         }
     }
     movementStarted() {
-        if (this.m_textElementsRenderer !== undefined) {
-            this.m_textElementsRenderer.movementStarted();
-        }
+        this.m_textElementsRenderer.movementStarted();
         MOVEMENT_STARTED_EVENT.time = Date.now();
         this.dispatchEvent(MOVEMENT_STARTED_EVENT);
     }
     movementFinished() {
-        if (this.m_textElementsRenderer !== undefined) {
-            this.m_textElementsRenderer.movementFinished();
-        }
+        this.m_textElementsRenderer.movementFinished();
         MOVEMENT_FINISHED_EVENT.time = Date.now();
         this.dispatchEvent(MOVEMENT_FINISHED_EVENT);
         // render at the next possible time.
@@ -19547,23 +20055,6 @@ class MapView extends THREE.EventDispatcher {
                 this.update();
             }, 0);
         }
-    }
-    /**
-     * Check if the `textElementsChanged` flag in any tile has been set to `true`. If any flag was
-     * `true`, this function returns `true`, and resets the flag in all tiles to `false`.
-     */
-    checkIfTextElementsChanged() {
-        const renderList = this.m_visibleTiles.dataSourceTileList;
-        let textElementsChanged = false;
-        renderList.forEach(({ renderedTiles }) => {
-            renderedTiles.forEach(tile => {
-                if (tile.textElementsChanged) {
-                    tile.textElementsChanged = false;
-                    textElementsChanged = true;
-                }
-            });
-        });
-        return textElementsChanged;
     }
     /**
      * Check if the set of visible tiles changed since the last frame.
@@ -19675,29 +20166,17 @@ class MapView extends THREE.EventDispatcher {
         this.m_scene.add(this.m_mapTilesRoot);
         this.m_scene.add(this.m_mapAnchors);
     }
-    /**
-     * Ensure `TextElementsRenderer` is initialized.
-     */
-    createTextRendererIfNeeded() {
-        if (this.m_textElementsRenderer === undefined) {
-            this.m_textElementsRenderer = new TextElementsRenderer_1.TextElementsRenderer(this, this.m_screenCollisions, this.m_screenProjector, this.m_options.minNumGlyphs, this.m_options.maxNumGlyphs, this.m_theme, this.m_options.maxNumVisibleLabels, this.m_options.numSecondChanceLabels, this.m_options.labelDistanceScaleMin, this.m_options.labelDistanceScaleMax, this.m_options.maxDistanceRatioForTextLabels, this.m_options.maxDistanceRatioForPoiLabels);
-        }
-    }
-    /**
-     * Delay creation of `TextElementsRenderer` to out-of-frame to avoid fps lag.
-     */
-    enqueueTextRendererCreation() {
-        if (this.m_textElementsRenderer === undefined &&
-            this.m_textElementsRendererTimer === undefined) {
-            this.m_textElementsRendererTimer = setTimeout(() => {
-                this.m_textElementsRendererTimer = undefined;
-                this.createTextRendererIfNeeded();
-            }, 0);
-        }
+    createTextRenderer() {
+        const updateCallback = () => {
+            this.update();
+        };
+        return new TextElementsRenderer_1.TextElementsRenderer(this, new MapViewState_1.MapViewState(this, this.checkIfTilesChanged.bind(this)), this.m_camera, updateCallback, this.renderer, this.m_poiManager, this.m_screenCollisions, this.m_screenProjector, this.m_theme, this.m_options);
     }
     resetTextRenderer() {
-        if (this.m_textElementsRenderer !== undefined) {
-            this.m_textElementsRenderer = undefined;
+        const overlayText = this.m_textElementsRenderer.overlayText;
+        this.m_textElementsRenderer = this.createTextRenderer();
+        if (overlayText !== undefined) {
+            this.m_textElementsRenderer.addOverlayText(overlayText);
         }
     }
     limitFov(fov, aspect) {
@@ -21030,6 +21509,13 @@ exports.ScreenCollisionsDebug = ScreenCollisionsDebug;
 Object.defineProperty(exports, "__esModule", { value: true });
 const THREE = __webpack_require__(/*! three */ "three");
 /**
+ * Determines whether a position in NDC (Normalized Device Coordinates) is inside the screen.
+ * @param ndc The position to check.
+ */
+function isOnScreen(ndc) {
+    return ndc.z > -1 && ndc.z < 1 && ndc.x >= -1 && ndc.x <= 1 && ndc.y >= -1 && ndc.y <= 1;
+}
+/**
  * @hidden
  * Handles the projection of world coordinates to screen coordinates.
  */
@@ -21068,8 +21554,23 @@ class ScreenProjector {
     project(source, target = new THREE.Vector2()) {
         const p = this.projectVector(source, ScreenProjector.tempV3);
         if (p.z > -1 && p.z < 1) {
-            target.set((p.x * this.m_width) / 2, (p.y * this.m_height) / 2);
-            return target;
+            return this.ndcToScreen(p, target);
+        }
+        return undefined;
+    }
+    /**
+     * Apply current projectionViewMatrix of the camera to project the source vector into
+     * screen coordinates.
+     *
+     * @param {(Vector3Like)} source The source vector to project.
+     * @param {THREE.Vector2} target The target vector.
+     * @returns {THREE.Vector2} The projected vector (the parameter 'target') or undefined if
+     * outside the screen.
+     */
+    projectOnScreen(source, target = new THREE.Vector2()) {
+        const p = this.projectVector(source, ScreenProjector.tempV3);
+        if (isOnScreen(p)) {
+            return this.ndcToScreen(p, target);
         }
         return undefined;
     }
@@ -21109,10 +21610,7 @@ class ScreenProjector {
      */
     onScreen(source) {
         const p = this.projectVector(source, ScreenProjector.tempV3);
-        if (p.z > -1 && p.z < 1) {
-            return p.x >= -1 && p.x <= 1 && p.y >= -1 && p.y <= 1;
-        }
-        return false;
+        return isOnScreen(p);
     }
     /**
      * Update the `ScreenProjector` with the latest values of the screen and the camera.
@@ -21125,6 +21623,9 @@ class ScreenProjector {
         this.m_camera = camera;
         this.m_width = width;
         this.m_height = height;
+    }
+    ndcToScreen(ndc, screenCoords) {
+        return screenCoords.set((ndc.x * this.m_width) / 2, (ndc.y * this.m_height) / 2);
     }
 }
 exports.ScreenProjector = ScreenProjector;
@@ -22682,8 +23183,11 @@ class ThemeLoader {
      *  -  `ref` - resolves all `ref` instances to their values defined in `definitions` section
      *     of theme (see [[resolveThemeReferences]])
      *
-     * Relative URLs of reference resources are resolved to full URL using the document's base URL
+     * Relative URIs of reference resources are resolved to full URL using the document's base URL
      * (see [[resolveUrls]]).
+     *
+     * Custom URIs (of theme itself and of resources referenced by theme) may be resolved with by
+     * providing [[UriResolver]] using [[ThemeLoadOptions.uriResolver]] option.
      *
      * @param theme [[Theme]] instance or theme URL to the theme.
      * @param options Optional, a [[ThemeLoadOptions]] objects containing any custom settings for
@@ -22692,25 +23196,26 @@ class ThemeLoader {
     static async load(theme, options) {
         options = options || {};
         if (typeof theme === "string") {
-            const themeUrl = harp_utils_1.defaultUrlResolver(theme);
+            const uriResolver = options.uriResolver;
+            const themeUrl = uriResolver !== undefined ? uriResolver.resolveUri(theme) : theme;
             const response = await fetch(themeUrl, { signal: options.signal });
             if (!response.ok) {
                 throw new Error(`ThemeLoader#load: cannot load theme: ${response.statusText}`);
             }
             theme = (await response.json());
-            theme.url = harp_utils_1.resolveReferenceUrl(harp_utils_1.getAppBaseUrl(), themeUrl);
-            theme = this.resolveUrls(theme);
+            theme.url = harp_utils_1.resolveReferenceUri(harp_utils_1.getAppBaseUrl(), themeUrl);
+            theme = this.resolveUrls(theme, uriResolver);
         }
         else if (theme.url === undefined) {
             // assume that theme url is same as baseUrl
             theme.url = harp_utils_1.getAppBaseUrl();
-            theme = this.resolveUrls(theme);
+            theme = this.resolveUrls(theme, options.uriResolver);
         }
         if (theme === null || theme === undefined) {
             throw new Error("ThemeLoader#load: loaded resource is not valid JSON");
         }
         theme = theme;
-        // Remember the URL where the theme has been loaded from.
+        ThemeLoader.checkTechniqueSupport(theme);
         const resolveDefinitions = harp_utils_1.getOptionValue(options.resolveDefinitions, false);
         theme = await ThemeLoader.resolveBaseTheme(theme, options);
         if (resolveDefinitions) {
@@ -22747,21 +23252,21 @@ class ThemeLoader {
      *
      * @param theme The [[Theme]] to resolve.
      */
-    static resolveUrls(theme) {
-        // Ensure that all resources referenced in theme by relative URLs are in fact relative to
+    static resolveUrls(theme, uriResolver) {
+        // Ensure that all resources referenced in theme by relative URIs are in fact relative to
         // theme.
         if (theme.url === undefined) {
             return theme;
         }
-        const childUrlResolver = harp_utils_1.composeUrlResolvers((childUrl) => harp_utils_1.resolveReferenceUrl(theme.url, childUrl), harp_utils_1.defaultUrlResolver);
+        const childUrlResolver = harp_utils_1.composeUriResolvers(new harp_utils_1.RelativeUriResolver(theme.url), uriResolver);
         if (theme.extends) {
             if (typeof theme.extends === "string") {
-                theme.extends = childUrlResolver(theme.extends);
+                theme.extends = childUrlResolver.resolveUri(theme.extends);
             }
             else {
                 if (theme.extends.url === undefined) {
                     theme.extends.url = theme.url;
-                    theme.extends = this.resolveUrls(theme.extends);
+                    theme.extends = this.resolveUrls(theme.extends, uriResolver);
                 }
             }
         }
@@ -22769,27 +23274,27 @@ class ThemeLoader {
             for (let i = 0; i < SkyCubemapTexture_1.SKY_CUBEMAP_FACE_COUNT; ++i) {
                 const faceUrl = theme.sky[SkyCubemapTexture_1.SkyCubemapFaceId[i]];
                 if (faceUrl !== undefined) {
-                    theme.sky[SkyCubemapTexture_1.SkyCubemapFaceId[i]] = childUrlResolver(faceUrl);
+                    theme.sky[SkyCubemapTexture_1.SkyCubemapFaceId[i]] = childUrlResolver.resolveUri(faceUrl);
                 }
             }
         }
         if (theme.images) {
             for (const name of Object.keys(theme.images)) {
                 const image = theme.images[name];
-                image.url = childUrlResolver(image.url);
+                image.url = childUrlResolver.resolveUri(image.url);
                 if (image.atlas !== undefined) {
-                    image.atlas = childUrlResolver(image.atlas);
+                    image.atlas = childUrlResolver.resolveUri(image.atlas);
                 }
             }
         }
         if (theme.fontCatalogs) {
             for (const font of theme.fontCatalogs) {
-                font.url = childUrlResolver(font.url);
+                font.url = childUrlResolver.resolveUri(font.url);
             }
         }
         if (theme.poiTables) {
             for (const poiTable of theme.poiTables) {
-                poiTable.url = childUrlResolver(poiTable.url);
+                poiTable.url = childUrlResolver.resolveUri(poiTable.url);
             }
         }
         if (theme.styles) {
@@ -22805,13 +23310,34 @@ class ThemeLoader {
                     ["map", "normalMap", "displacementMap", "roughnessMap"].forEach(texturePropertyName => {
                         const textureProperty = style.attr[texturePropertyName];
                         if (textureProperty && typeof textureProperty === "string") {
-                            style.attr[texturePropertyName] = childUrlResolver(textureProperty);
+                            style.attr[texturePropertyName] = childUrlResolver.resolveUri(textureProperty);
                         }
                     });
                 }
             }
         }
         return theme;
+    }
+    static checkTechniqueSupport(theme) {
+        if (theme.styles !== undefined) {
+            for (const styleSetName in theme.styles) {
+                if (!theme.styles.hasOwnProperty(styleSetName)) {
+                    continue;
+                }
+                for (const style of theme.styles[styleSetName]) {
+                    switch (style.technique) {
+                        // TODO: Re-enable this once "dashed-line" is deprecated.
+                        /* case "dashed-line":
+                            console.warn(
+                                `Using deprecated "dashed-line" technique.
+                                Use "solid-line" technique instead`
+                            ); */
+                        default:
+                            break;
+                    }
+                }
+            }
+        }
     }
     /**
      * Expand all `ref` expressions in [[Theme]] basing on `definitions`.
@@ -23016,6 +23542,8 @@ const harp_geoutils_1 = __webpack_require__(/*! @here/harp-geoutils */ "../harp-
 const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
 const THREE = __webpack_require__(/*! three */ "three");
 const Statistics_1 = __webpack_require__(/*! ./Statistics */ "../harp-mapview/lib/Statistics.ts");
+const TextElementGroup_1 = __webpack_require__(/*! ./text/TextElementGroup */ "../harp-mapview/lib/text/TextElementGroup.ts");
+const TextElementGroupPriorityList_1 = __webpack_require__(/*! ./text/TextElementGroupPriorityList */ "../harp-mapview/lib/text/TextElementGroupPriorityList.ts");
 const Utils_1 = __webpack_require__(/*! ./Utils */ "../harp-mapview/lib/Utils.ts");
 const logger = harp_utils_1.LoggerManager.instance.create("Tile");
 /**
@@ -23108,6 +23636,10 @@ class Tile {
          */
         this.boundingBox = new harp_geoutils_1.OrientedBox3();
         /**
+         * Maximum height of geometry on this tile above ground level.
+         */
+        this.maxGeometryHeight = 0;
+        /**
          * Keeping some stats for the individual [[Tile]]s to analyze caching behavior.
          *
          * The frame the [[Tile]] was last requested. This is required to know when the given [[Tile]]
@@ -23134,18 +23666,28 @@ class Tile {
          * computing visibility.
          */
         this.visibilityCounter = -1;
+        /**
+         * @hidden
+         *
+         * Used to tell if the Tile is used temporarily as a fallback tile.
+         *
+         * levelOffset is in in the range [-quadTreeSearchDistanceUp,
+         * quadTreeSearchDistanceDown], where these values come from the
+         * [[VisibleTileSetOptions]]
+         */
+        this.levelOffset = 0;
         this.m_disposed = false;
         this.m_localTangentSpace = false;
         this.m_forceHasGeometry = undefined;
-        // Used for [[TextElement]]s which the developer defines.
-        this.m_userTextElements = [];
+        // TODO: Delay construction of text element groups until first text element is added.
+        // Used for [[TextElement]]s which the developer defines. Group created with maximum priority
+        // so that user text elements are placed before others.
+        this.m_userTextElements = new TextElementGroup_1.TextElementGroup(Number.MAX_SAFE_INTEGER);
         // Used for [[TextElement]]s that are stored in the data, and that are placed explicitly,
         // fading in and out.
-        this.m_textElementGroups = new harp_utils_1.GroupedPriorityList();
+        this.m_textElementGroups = new TextElementGroupPriorityList_1.TextElementGroupPriorityList();
         // Blocks other labels from showing.
         this.m_pathBlockingElements = [];
-        // All visible [[TextElement]]s.
-        this.m_placedTextElements = new harp_utils_1.GroupedPriorityList();
         // If `true`, the text content of the [[Tile]] changed.
         this.m_textElementsChanged = false;
         this.m_visibleArea = 0;
@@ -23194,13 +23736,6 @@ class Tile {
      */
     get localTangentSpace() {
         return this.m_localTangentSpace;
-    }
-    /**
-     * Get the currently visible [[TextElement]]s of this `Tile`. This list is continuously
-     * modified, and is not designed to be used to store developer-defined [[TextElements]].
-     */
-    get placedTextElements() {
-        return this.m_placedTextElements;
     }
     /*
      * The size of this Tile in system memory.
@@ -23258,7 +23793,7 @@ class Tile {
      * @param textElement The Text element to add.
      */
     addUserTextElement(textElement) {
-        this.m_userTextElements.push(textElement);
+        this.m_userTextElements.elements.push(textElement);
         this.textElementsChanged = true;
     }
     /**
@@ -23268,9 +23803,9 @@ class Tile {
      * @returns `true` if the element has been removed successfully; `false` otherwise.
      */
     removeUserTextElement(textElement) {
-        const foundIndex = this.m_userTextElements.indexOf(textElement);
+        const foundIndex = this.m_userTextElements.elements.indexOf(textElement);
         if (foundIndex >= 0) {
-            this.m_userTextElements.splice(foundIndex, 1);
+            this.m_userTextElements.elements.splice(foundIndex, 1);
             this.textElementsChanged = true;
             return true;
         }
@@ -23335,7 +23870,7 @@ class Tile {
      * Returns true if the `Tile` has any text elements to render.
      */
     hasTextElements() {
-        return this.m_textElementGroups.count() > 0 || this.m_userTextElements.length > 0;
+        return this.m_textElementGroups.count() > 0 || this.m_userTextElements.elements.length > 0;
     }
     /**
      * Get the current blocking elements.
@@ -23396,7 +23931,7 @@ class Tile {
         this.m_minElevation = elevation;
     }
     /**
-     * Estimated maximum elevation above the sea level that may be found on tile.
+     * Estimated maximum ground elevation above the sea level that may be found on tile.
      * @note Negative values indicates depressions.
      */
     get maxElevation() {
@@ -23659,11 +24194,17 @@ class Tile {
         if (this.m_animatedExtrusionTileHandler !== undefined) {
             this.m_animatedExtrusionTileHandler.dispose();
         }
-        this.placedTextElements.clear();
+        this.clearTextElements();
+        this.invalidateResourceInfo();
+    }
+    /**
+     * Removes all [[TextElement]] from the tile.
+     */
+    clearTextElements() {
+        this.textElementsChanged = this.hasTextElements();
         this.m_pathBlockingElements.splice(0);
         this.textElementGroups.clear();
-        this.userTextElements.length = 0;
-        this.invalidateResourceInfo();
+        this.userTextElements.elements.length = 0;
     }
     /**
      * Disposes this `Tile`, freeing all geometries and materials for the reachable objects.
@@ -23681,10 +24222,18 @@ class Tile {
             this.m_tileGeometryLoader = undefined;
         }
         this.clear();
-        this.userTextElements.length = 0;
+        this.userTextElements.elements.length = 0;
         this.m_disposed = true;
         // Ensure that tile is removable from tile cache.
         this.frameNumLastRequested = 0;
+    }
+    /**
+     * Computes the offset in the x world coordinates corresponding to this tile, based on
+     * its [[offset]].
+     * @returns The x offset.
+     */
+    computeWorldOffsetX() {
+        return this.projection.worldExtent(0, 0).max.x * this.offset;
     }
     computeResourceInfo() {
         let heapSize = 0;
@@ -23707,7 +24256,7 @@ class Tile {
         for (const group of this.textElementGroups.groups) {
             numTextElements += group[1].elements.length;
         }
-        numUserTextElements = this.userTextElements.length;
+        numUserTextElements = this.userTextElements.elements.length;
         // 216 was the shallow size of a single TextElement last time it has been checked, 312 bytes
         // was the minimum retained size of a TextElement that was not being rendered. If a
         // TextElement is actually rendered, the size may be _much_ bigger.
@@ -23882,7 +24431,7 @@ var MapViewUtils;
         if (projection.type === harp_geoutils_1.ProjectionType.Planar) {
             result.x = result.x + Math.sin(yawRad) * groundDistance;
             result.y = result.y - Math.cos(yawRad) * groundDistance;
-            result.z = altitude;
+            result.z = result.z + altitude;
         }
         else if (projection.type === harp_geoutils_1.ProjectionType.Spherical) {
             // In globe yaw and pitch are understood to be in tangent space. The approach below is
@@ -24059,7 +24608,6 @@ var MapViewUtils;
      */
     function setRotation(mapView, yawDeg, pitchDeg) {
         getCameraRotationAtTarget(mapView.projection, mapView.geoCenter, yawDeg, pitchDeg, mapView.camera.quaternion);
-        mapView.camera.updateMatrixWorld(true);
     }
     MapViewUtils.setRotation = setRotation;
     /**
@@ -24377,6 +24925,37 @@ var MapViewUtils;
         return size;
     }
     MapViewUtils.estimateObject3dSize = estimateObject3dSize;
+    /**
+     * Check if tiles or other content is currently being loaded.
+     *
+     * This method can be removed once HARP-7932 is implemented.
+     *
+     * @returns `true` if MapView has visible tiles or other content that is being loaded.
+     */
+    function mapViewIsLoading(mapView) {
+        let numTilesLoading = 0;
+        for (const tileList of mapView.visibleTileSet.dataSourceTileList) {
+            numTilesLoading += tileList.numTilesLoading;
+            for (const tile of tileList.visibleTiles) {
+                if (tile.tileLoader !== undefined && !tile.tileLoader.isFinished) {
+                    numTilesLoading++;
+                }
+                if (tile.tileGeometryLoader !== undefined && !tile.tileGeometryLoader.isFinished) {
+                    numTilesLoading++;
+                }
+            }
+        }
+        let isLoading = numTilesLoading > 0;
+        if (mapView.textElementsRenderer !== undefined) {
+            isLoading = isLoading || mapView.textElementsRenderer.loading;
+        }
+        isLoading =
+            isLoading ||
+                !mapView.poiTableManager.finishedLoading ||
+                !mapView.visibleTileSet.allVisibleTilesLoaded;
+        return isLoading;
+    }
+    MapViewUtils.mapViewIsLoading = mapViewIsLoading;
     function estimateTextureSize(texture, objectSize, visitedObjects) {
         if (texture === null || texture.image === undefined) {
             return;
@@ -24753,7 +25332,6 @@ const harp_geoutils_1 = __webpack_require__(/*! @here/harp-geoutils */ "../harp-
 const harp_lrucache_1 = __webpack_require__(/*! @here/harp-lrucache */ "../harp-lrucache/index.ts");
 const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
 const THREE = __webpack_require__(/*! three */ "three");
-const ElevationRangeSource_1 = __webpack_require__(/*! ./ElevationRangeSource */ "../harp-mapview/lib/ElevationRangeSource.ts");
 const Utils_1 = __webpack_require__(/*! ./Utils */ "../harp-mapview/lib/Utils.ts");
 /**
  * Way the memory consumption of a tile is computed. Either in number of tiles, or in MegaBytes. If
@@ -24991,11 +25569,6 @@ class VisibleTileSet {
         this.allVisibleTilesLoaded = false;
         this.m_projectionMatrixOverride = new THREE.Matrix4();
         this.m_viewRange = { near: 0.1, far: Infinity, minimum: 0.1, maximum: Infinity };
-        this.m_elevationRange = {
-            minElevation: 0,
-            maxElevation: 0,
-            calculationStatus: ElevationRangeSource_1.CalculationStatus.PendingApproximate
-        };
         this.m_resourceComputationType = ResourceComputationType.EstimationInMb;
         this.options = options;
         this.m_resourceComputationType =
@@ -25155,45 +25728,32 @@ class VisibleTileSet {
             }
         });
         this.m_dataSourceCache.shrinkToCapacity();
-        let minElevation = harp_geoutils_1.EarthConstants.MAX_ELEVATION;
-        let maxElevation = harp_geoutils_1.EarthConstants.MIN_ELEVATION;
+        let minElevation;
+        let maxElevation;
         this.dataSourceTileList.forEach(renderListEntry => {
             // Calculate min/max elevation from every data source tiles,
             // data sources without elevationRangeSource will contribute to
             // values with zero levels for both elevations.
-            const tiles = renderListEntry.visibleTiles;
+            const tiles = renderListEntry.renderedTiles;
             tiles.forEach(tile => {
-                minElevation = Math.min(minElevation, tile.minElevation);
-                maxElevation = Math.max(maxElevation, tile.maxElevation);
+                minElevation = harp_utils_1.MathUtils.min2(minElevation, tile.minElevation);
+                maxElevation = harp_utils_1.MathUtils.max2(maxElevation, tile.maxElevation + tile.maxGeometryHeight);
             });
         });
-        // We process buildings elevation yet (via ElevationRangeSource or either way), so correct
-        // the highest elevation to account for highest possible building.
-        const projectionScale = this.m_frustumIntersection.projection.getScaleFactor(this.m_frustumIntersection.camera.position);
-        const maxBuildingHeight = harp_geoutils_1.EarthConstants.MAX_BUILDING_HEIGHT * projectionScale;
-        maxElevation =
-            maxElevation < harp_geoutils_1.EarthConstants.MAX_ELEVATION - maxBuildingHeight
-                ? maxElevation + maxBuildingHeight
-                : maxElevation;
-        // Update elevation ranges stored.
-        if (minElevation !== this.m_elevationRange.minElevation ||
-            maxElevation !== this.m_elevationRange.maxElevation) {
-            this.m_elevationRange.minElevation = minElevation;
-            this.m_elevationRange.maxElevation = maxElevation;
+        if (minElevation === undefined) {
+            minElevation = 0;
         }
-        this.m_elevationRange.calculationStatus = visibleTileKeysResult.allBoundingBoxesFinal
-            ? ElevationRangeSource_1.CalculationStatus.FinalPrecise
-            : ElevationRangeSource_1.CalculationStatus.PendingApproximate;
+        if (maxElevation === undefined) {
+            maxElevation = 0;
+        }
         // If clip planes evaluator depends on the tiles elevation re-calculate
         // frustum planes and update the camera near/far plane distances.
         let viewRangesChanged = false;
-        if (elevationRangeSource !== undefined) {
-            const viewRanges = this.updateClipPlanes(maxElevation, minElevation);
-            viewRangesChanged = viewRanges === this.m_viewRange;
-            this.m_viewRange = viewRanges;
-        }
+        const oldViewRanges = this.m_viewRange;
+        const newViewRanges = this.updateClipPlanes(maxElevation, minElevation);
+        viewRangesChanged = viewRangesEqual(newViewRanges, oldViewRanges) === false;
         return {
-            viewRanges: this.m_viewRange,
+            viewRanges: newViewRanges,
             viewRangesChanged
         };
     }
@@ -25413,6 +25973,7 @@ class VisibleTileSet {
             let incompleteTiles = new Map();
             renderListEntry.visibleTiles.forEach(tile => {
                 const tileCode = Utils_1.TileOffsetUtils.getKeyForTileKeyAndOffset(tile.tileKey, tile.offset);
+                tile.levelOffset = 0;
                 if (tile.hasGeometry || defaultSearchDirection === SearchDirection.NONE) {
                     renderedTiles.set(tileCode, tile);
                 }
@@ -25439,17 +26000,19 @@ class VisibleTileSet {
                             checkedTiles.add(parentCode);
                             const { offset, mortonCode } = Utils_1.TileOffsetUtils.extractOffsetAndMortonKeyFromKey(parentCode);
                             const parentTile = tileCache.get(mortonCode, offset, dataSource);
-                            if (parentTile !== undefined && parentTile.hasGeometry) {
-                                // parentTile has geometry, so can be reused as fallback
-                                renderedTiles.set(parentCode, parentTile);
-                                return;
-                            }
                             const parentTileKey = parentTile
                                 ? parentTile.tileKey
                                 : harp_geoutils_1.TileKey.fromMortonCode(mortonCode);
+                            const nextLevelDiff = Math.abs(displayZoomLevel - parentTileKey.level);
+                            if (parentTile !== undefined && parentTile.hasGeometry) {
+                                // parentTile has geometry, so can be reused as fallback
+                                renderedTiles.set(parentCode, parentTile);
+                                // We want to have parent tiles as -ve, hence the minus.
+                                parentTile.levelOffset = -nextLevelDiff;
+                                return;
+                            }
                             // if parentTile is missing or incomplete, try at max 3 levels up from
                             // current display level
-                            const nextLevelDiff = Math.abs(displayZoomLevel - parentTileKey.level);
                             if (nextLevelDiff < this.options.quadTreeSearchDistanceUp) {
                                 nextLevelCandidates.set(parentCode, SearchDirection.UP);
                             }
@@ -25463,12 +26026,13 @@ class VisibleTileSet {
                             const childTileCode = Utils_1.TileOffsetUtils.getKeyForTileKeyAndOffset(childTileKey, offset);
                             checkedTiles.add(childTileCode);
                             const childTile = tileCache.get(childTileKey.mortonCode(), offset, dataSource);
+                            const nextLevelDiff = Math.abs(childTileKey.level - displayZoomLevel);
                             if (childTile !== undefined && childTile.hasGeometry) {
                                 // childTile has geometry, so can be reused as fallback
                                 renderedTiles.set(childTileCode, childTile);
+                                childTile.levelOffset = nextLevelDiff;
                                 continue;
                             }
-                            const nextLevelDiff = Math.abs(childTileKey.level - displayZoomLevel);
                             if (nextLevelDiff < this.options.quadTreeSearchDistanceDown) {
                                 nextLevelCandidates.set(childTileCode, SearchDirection.DOWN);
                             }
@@ -25521,6 +26085,9 @@ class VisibleTileSet {
                 if (tile.tileGeometryLoader !== undefined) {
                     tile.tileGeometryLoader.reset();
                 }
+                // Prevent label rendering issues when the style set is changing. Prevent Text
+                // element rendering that depends on cleaned font catalog data.
+                tile.clearTextElements();
                 tile.load();
             }
         }
@@ -25592,6 +26159,9 @@ class VisibleTileSet {
     }
 }
 exports.VisibleTileSet = VisibleTileSet;
+function viewRangesEqual(a, b) {
+    return (a.far === b.far && a.maximum === b.maximum && a.minimum === b.minimum && a.near === b.near);
+}
 
 
 /***/ }),
@@ -26203,9 +26773,26 @@ exports.MSAARenderPass = MSAARenderPass;
 // tslint:disable-next-line:member-ordering
 MSAARenderPass.OffsetVectors = [
     [[0, 0]],
-    [[4, 4], [-4, -4]],
-    [[-2, -6], [6, -2], [-6, 2], [2, 6]],
-    [[1, -3], [-1, 3], [5, 1], [-3, -5], [-5, 5], [-7, -1], [3, 7], [7, -7]],
+    [
+        [4, 4],
+        [-4, -4]
+    ],
+    [
+        [-2, -6],
+        [6, -2],
+        [-6, 2],
+        [2, 6]
+    ],
+    [
+        [1, -3],
+        [-1, 3],
+        [5, 1],
+        [-3, -5],
+        [-5, 5],
+        [-7, -1],
+        [3, 7],
+        [7, -7]
+    ],
     [
         [1, 1],
         [-1, -3],
@@ -26784,8 +27371,7 @@ class OutlineEffect {
             }
         }
         else {
-            object.material = this.getOutlineMaterial(object
-                .material);
+            object.material = this.getOutlineMaterial(object.material);
         }
         this.m_originalOnBeforeRenders[object.uuid] = object.onBeforeRender;
         object.onBeforeRender = harp_utils_1.chainCallbacks(object.onBeforeRender, this.onBeforeRender.bind(this));
@@ -28805,10 +29391,10 @@ const AnimatedExtrusionHandler_1 = __webpack_require__(/*! ../AnimatedExtrusionH
 const ColorCache_1 = __webpack_require__(/*! ../ColorCache */ "../harp-mapview/lib/ColorCache.ts");
 const DecodedTileHelpers_1 = __webpack_require__(/*! ../DecodedTileHelpers */ "../harp-mapview/lib/DecodedTileHelpers.ts");
 const DepthPrePass_1 = __webpack_require__(/*! ../DepthPrePass */ "../harp-mapview/lib/DepthPrePass.ts");
+const MapView_1 = __webpack_require__(/*! ../MapView */ "../harp-mapview/lib/MapView.ts");
 const PathBlockingElement_1 = __webpack_require__(/*! ../PathBlockingElement */ "../harp-mapview/lib/PathBlockingElement.ts");
 const TextElement_1 = __webpack_require__(/*! ../text/TextElement */ "../harp-mapview/lib/text/TextElement.ts");
 const TextElementsRenderer_1 = __webpack_require__(/*! ../text/TextElementsRenderer */ "../harp-mapview/lib/text/TextElementsRenderer.ts");
-const TextStyleCache_1 = __webpack_require__(/*! ../text/TextStyleCache */ "../harp-mapview/lib/text/TextStyleCache.ts");
 const TileGeometryLoader_1 = __webpack_require__(/*! ./TileGeometryLoader */ "../harp-mapview/lib/geometry/TileGeometryLoader.ts");
 const logger = harp_utils_1.LoggerManager.instance.create("TileGeometryCreator");
 /**
@@ -28830,6 +29416,13 @@ class TileGeometryCreator {
      *  Creates an instance of TileGeometryCreator. Access is allowed only through `instance`.
      */
     constructor() {
+        // These are used for clipping the geometry so that the overlapping geometry is removed.
+        this.clippingPlanes = [
+            new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0),
+            new THREE.Plane(new THREE.Vector3(1, 0, 0), 0),
+            new THREE.Plane(new THREE.Vector3(0, -1, 0), 0),
+            new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
+        ];
         //
     }
     /**
@@ -28896,6 +29489,9 @@ class TileGeometryCreator {
         const filter = (technique) => {
             return technique.enabled !== false;
         };
+        if (decodedTile.maxGeometryHeight !== undefined) {
+            tile.maxGeometryHeight = decodedTile.maxGeometryHeight;
+        }
         this.createObjects(tile, decodedTile, filter);
         this.preparePois(tile, decodedTile);
         // TextElements do not get their geometry created by Tile, but are managed on a
@@ -28910,6 +29506,18 @@ class TileGeometryCreator {
         };
         this.createTextElements(tile, decodedTile, textFilter);
         this.createLabelRejectionElements(tile, decodedTile);
+        // HARP-7899, disable ground plane for globe
+        if (tile.dataSource.addGroundPlane && tile.projection.type === harp_geoutils_1.ProjectionType.Planar) {
+            // The ground plane is required for when we change the zoom back and we fall back to the
+            // parent, in that case we reduce the renderOrder of the parent tile and this ground
+            // place ensures that parent doesn't come through. This value must be above the
+            // renderOrder of all objects in the fallback tile, otherwise there won't be a proper
+            // covering of the parent tile by the children, hence dividing by 2. To put a bit more
+            // concretely, we assume all objects are rendered with a renderOrder between 0 and
+            // FALLBACK_RENDER_ORDER_OFFSET / 2, i.e. 10000. The ground plane is put at -10000, and
+            // the fallback tiles have their renderOrder set between -20000 and -10000
+            TileGeometryCreator.instance.addGroundPlane(tile, -MapView_1.FALLBACK_RENDER_ORDER_OFFSET / 2);
+        }
     }
     createLabelRejectionElements(tile, decodedTile) {
         if (decodedTile.pathGeometries === undefined) {
@@ -29003,7 +29611,9 @@ class TileGeometryCreator {
      */
     createTextElements(tile, decodedTile, textFilter) {
         const mapView = tile.mapView;
+        const textElementsRenderer = mapView.textElementsRenderer;
         const displayZoomLevel = Math.floor(mapView.zoomLevel);
+        const worldOffsetX = tile.computeWorldOffsetX();
         if (decodedTile.textPathGeometries !== undefined) {
             const textPathGeometries = this.prepareTextPaths(decodedTile.textPathGeometries, decodedTile, textFilter);
             // Compute maximum street length (squared). Longer streets should be labelled first,
@@ -29028,7 +29638,7 @@ class TileGeometryCreator {
                 }
                 const path = [];
                 for (let i = 0; i < textPath.path.length; i += 3) {
-                    path.push(new THREE.Vector3(textPath.path[i], textPath.path[i + 1], textPath.path[i + 2]));
+                    path.push(new THREE.Vector3(textPath.path[i] + worldOffsetX, textPath.path[i + 1], textPath.path[i + 2]));
                 }
                 // Make sorting stable and make pathLengthSqr a differentiator for placement.
                 const priority = (technique.priority !== undefined
@@ -29043,7 +29653,7 @@ class TileGeometryCreator {
                 const fadeFar = technique.fadeFar !== undefined
                     ? harp_datasource_protocol_1.getPropertyValue(technique.fadeFar, displayZoomLevel)
                     : technique.fadeFar;
-                const textElement = new TextElement_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(textPath.text), path, this.getRenderStyle(tile, technique), this.getLayoutStyle(tile, technique), priority, technique.xOffset !== undefined ? technique.xOffset : 0.0, technique.yOffset !== undefined ? technique.yOffset : 0.0, textPath.featureId, technique.style, fadeNear, fadeFar);
+                const textElement = new TextElement_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(textPath.text), path, textElementsRenderer.styleCache.getRenderStyle(tile, technique), textElementsRenderer.styleCache.getLayoutStyle(tile, technique), priority, technique.xOffset !== undefined ? technique.xOffset : 0.0, technique.yOffset !== undefined ? technique.yOffset : 0.0, textPath.featureId, technique.style, fadeNear, fadeFar);
                 textElement.minZoomLevel =
                     technique.minZoomLevel !== undefined
                         ? technique.minZoomLevel
@@ -29090,7 +29700,7 @@ class TileGeometryCreator {
                     ? harp_datasource_protocol_1.getPropertyValue(technique.fadeFar, displayZoomLevel)
                     : technique.fadeFar;
                 for (let i = 0; i < numPositions; ++i) {
-                    const x = positions.getX(i);
+                    const x = positions.getX(i) + worldOffsetX;
                     const y = positions.getY(i);
                     const z = positions.getZ(i);
                     const label = text.stringCatalog[text.texts[i]];
@@ -29098,7 +29708,7 @@ class TileGeometryCreator {
                         // skip missing labels
                         continue;
                     }
-                    const textElement = new TextElement_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(label), new THREE.Vector3(x, y, z), this.getRenderStyle(tile, technique), this.getLayoutStyle(tile, technique), priority, technique.xOffset || 0.0, technique.yOffset || 0.0, text.featureId, technique.style);
+                    const textElement = new TextElement_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(label), new THREE.Vector3(x, y, z), textElementsRenderer.styleCache.getRenderStyle(tile, technique), textElementsRenderer.styleCache.getLayoutStyle(tile, technique), priority, technique.xOffset || 0.0, technique.yOffset || 0.0, text.featureId, technique.style);
                     textElement.minZoomLevel =
                         technique.minZoomLevel !== undefined
                             ? technique.minZoomLevel
@@ -29116,7 +29726,6 @@ class TileGeometryCreator {
                         // Get the userData for text element picking.
                         textElement.userData = text.objInfos[i];
                     }
-                    textElement.isPointLabel = true;
                     tile.addTextElement(textElement);
                 }
             }
@@ -29190,7 +29799,7 @@ class TileGeometryCreator {
                 const bufferGeometry = new THREE.BufferGeometry();
                 srcGeometry.vertexAttributes.forEach((vertexAttribute) => {
                     const buffer = DecodedTileHelpers_1.getBufferAttribute(vertexAttribute);
-                    bufferGeometry.addAttribute(vertexAttribute.name, buffer);
+                    bufferGeometry.setAttribute(vertexAttribute.name, buffer);
                 });
                 if (srcGeometry.interleavedVertexAttributes !== undefined) {
                     srcGeometry.interleavedVertexAttributes.forEach((attr) => {
@@ -29198,7 +29807,7 @@ class TileGeometryCreator {
                         const buffer = new THREE.InterleavedBuffer(new ArrayCtor(attr.buffer), attr.stride);
                         attr.attributes.forEach((interleavedAttr) => {
                             const attribute = new THREE.InterleavedBufferAttribute(buffer, interleavedAttr.itemSize, interleavedAttr.offset, false);
-                            bufferGeometry.addAttribute(interleavedAttr.name, attribute);
+                            bufferGeometry.setAttribute(interleavedAttr.name, attribute);
                         });
                     });
                 }
@@ -29209,7 +29818,7 @@ class TileGeometryCreator {
                     bufferGeometry.computeVertexNormals();
                 }
                 bufferGeometry.addGroup(start, count);
-                if (harp_datasource_protocol_1.isSolidLineTechnique(technique) || harp_datasource_protocol_1.isDashedLineTechnique(technique)) {
+                if (harp_datasource_protocol_1.isSolidLineTechnique(technique)) {
                     const lineMaterial = material;
                     lineMaterial.uniforms.opacity.value = material.opacity;
                     if (technique.clipping !== false &&
@@ -29239,6 +29848,38 @@ class TileGeometryCreator {
                 if (srcGeometry.uuid !== undefined) {
                     object.userData.geometryId = srcGeometry.uuid;
                 }
+                if (harp_datasource_protocol_1.isFillTechnique(technique) &&
+                    mapView.projection.type === harp_geoutils_1.ProjectionType.Planar) {
+                    object.onBeforeRender = harp_utils_1.chainCallbacks(object.onBeforeRender, (_renderer, _scene, _camera, _geometry, _material) => {
+                        if (_material.clippingPlanes === null) {
+                            _material.clippingPlanes = this.clippingPlanes;
+                            // TODO: Add clipping for Spherical projection.
+                        }
+                        const worldOffsetX = mapView.projection.worldExtent(0, 0).max.x * tile.offset;
+                        // This prevents aliasing issues in the pixel shader, there are artifacts
+                        // at low zoom levels, so we increase the factor by 10 to 1%.
+                        const expandFactor = mapView.zoomLevel <= 2 ? 1.01 : 1.001;
+                        const planes = _material.clippingPlanes;
+                        const rightConstant = tile.center.x -
+                            mapView.worldCenter.x +
+                            tile.boundingBox.extents.x * expandFactor +
+                            worldOffsetX;
+                        planes[0].constant = rightConstant;
+                        const leftConstant = tile.center.x -
+                            mapView.worldCenter.x -
+                            tile.boundingBox.extents.x * expandFactor +
+                            worldOffsetX;
+                        planes[1].constant = -leftConstant;
+                        const topConstant = tile.center.y -
+                            mapView.worldCenter.y +
+                            tile.boundingBox.extents.y * expandFactor;
+                        planes[2].constant = topConstant;
+                        const bottomConstant = tile.center.y -
+                            mapView.worldCenter.y -
+                            tile.boundingBox.extents.y * expandFactor;
+                        planes[3].constant = -bottomConstant;
+                    });
+                }
                 if ((harp_datasource_protocol_1.isCirclesTechnique(technique) || harp_datasource_protocol_1.isSquaresTechnique(technique)) &&
                     technique.enablePicking !== undefined) {
                     // tslint:disable-next-line:max-line-length
@@ -29257,7 +29898,7 @@ class TileGeometryCreator {
                 // Lines renderOrder fix: Render them as transparent objects, but make sure they end
                 // up in the opaque rendering queue (by disabling transparency onAfterRender, and
                 // enabling it onBeforeRender).
-                if (harp_datasource_protocol_1.isSolidLineTechnique(technique) || harp_datasource_protocol_1.isDashedLineTechnique(technique)) {
+                if (harp_datasource_protocol_1.isSolidLineTechnique(technique)) {
                     const fadingParams = this.getFadingParams(displayZoomLevel, technique);
                     harp_materials_1.FadingFeature.addRenderHelper(object, viewRanges, fadingParams.fadeNear, fadingParams.fadeFar, true, false, (renderer, mat) => {
                         const lineMaterial = mat;
@@ -29273,21 +29914,17 @@ class TileGeometryCreator {
                             lineMaterial.outlineWidth =
                                 harp_datasource_protocol_1.getPropertyValue(technique.outlineWidth, mapView.zoomLevel, mapView.pixelToWorld) * unitFactor;
                         }
-                        // Do the same for dashSize and gapSize for dashed lines.
-                        if (harp_datasource_protocol_1.isDashedLineTechnique(technique)) {
-                            const dashedLineMaterial = lineMaterial;
-                            if (technique.dashSize !== undefined) {
-                                dashedLineMaterial.dashSize =
-                                    harp_datasource_protocol_1.getPropertyValue(technique.dashSize, mapView.zoomLevel, mapView.pixelToWorld) *
-                                        unitFactor *
-                                        0.5;
-                            }
-                            if (technique.gapSize !== undefined) {
-                                dashedLineMaterial.gapSize =
-                                    harp_datasource_protocol_1.getPropertyValue(technique.gapSize, mapView.zoomLevel, mapView.pixelToWorld) *
-                                        unitFactor *
-                                        0.5;
-                            }
+                        if (technique.dashSize !== undefined) {
+                            lineMaterial.dashSize =
+                                harp_datasource_protocol_1.getPropertyValue(technique.dashSize, mapView.zoomLevel, mapView.pixelToWorld) *
+                                    unitFactor *
+                                    0.5;
+                        }
+                        if (technique.gapSize !== undefined) {
+                            lineMaterial.gapSize =
+                                harp_datasource_protocol_1.getPropertyValue(technique.gapSize, mapView.zoomLevel, mapView.pixelToWorld) *
+                                    unitFactor *
+                                    0.5;
                         }
                     });
                 }
@@ -29334,7 +29971,7 @@ class TileGeometryCreator {
                 let extrusionAnimationEnabled = false;
                 if (harp_datasource_protocol_1.isExtrudedPolygonTechnique(technique) &&
                     animatedExtrusionHandler !== undefined) {
-                    let animateExtrusionValue = technique.animateExtrusion;
+                    let animateExtrusionValue = harp_datasource_protocol_1.getPropertyValue(technique.animateExtrusion, displayZoomLevel);
                     if (animateExtrusionValue !== undefined) {
                         animateExtrusionValue =
                             typeof animateExtrusionValue === "boolean"
@@ -29369,22 +30006,22 @@ class TileGeometryCreator {
                 // Add the extruded building edges as a separate geometry.
                 if (harp_datasource_protocol_1.isExtrudedPolygonTechnique(technique) && srcGeometry.edgeIndex !== undefined) {
                     const edgeGeometry = new THREE.BufferGeometry();
-                    edgeGeometry.addAttribute("position", bufferGeometry.getAttribute("position"));
+                    edgeGeometry.setAttribute("position", bufferGeometry.getAttribute("position"));
                     const colorAttribute = bufferGeometry.getAttribute("color");
                     if (colorAttribute !== undefined) {
-                        edgeGeometry.addAttribute("color", colorAttribute);
+                        edgeGeometry.setAttribute("color", colorAttribute);
                     }
                     const extrusionAttribute = bufferGeometry.getAttribute("extrusionAxis");
                     if (extrusionAttribute !== undefined) {
-                        edgeGeometry.addAttribute("extrusionAxis", extrusionAttribute);
+                        edgeGeometry.setAttribute("extrusionAxis", extrusionAttribute);
                     }
                     const normalAttribute = bufferGeometry.getAttribute("normal");
                     if (normalAttribute !== undefined) {
-                        edgeGeometry.addAttribute("normal", normalAttribute);
+                        edgeGeometry.setAttribute("normal", normalAttribute);
                     }
                     const uvAttribute = bufferGeometry.getAttribute("uv");
                     if (uvAttribute !== undefined) {
-                        edgeGeometry.addAttribute("uv", uvAttribute);
+                        edgeGeometry.setAttribute("uv", uvAttribute);
                     }
                     edgeGeometry.setIndex(DecodedTileHelpers_1.getBufferAttribute(srcGeometry.edgeIndex));
                     // Read the uniforms from the technique values (and apply the default values).
@@ -29432,7 +30069,7 @@ class TileGeometryCreator {
                 // Add the fill area edges as a separate geometry.
                 if (harp_datasource_protocol_1.isFillTechnique(technique) && srcGeometry.edgeIndex !== undefined) {
                     const outlineGeometry = new THREE.BufferGeometry();
-                    outlineGeometry.addAttribute("position", bufferGeometry.getAttribute("position"));
+                    outlineGeometry.setAttribute("position", bufferGeometry.getAttribute("position"));
                     outlineGeometry.setIndex(DecodedTileHelpers_1.getBufferAttribute(srcGeometry.edgeIndex));
                     const fillTechnique = technique;
                     const fadingParams = this.getPolygonFadingParams(displayZoomLevel, fillTechnique);
@@ -29462,8 +30099,11 @@ class TileGeometryCreator {
                     const outlineMaterial = material.clone();
                     const outlineColor = ColorCache_1.ColorCache.instance.getColor(outlineTechnique.secondaryColor !== undefined
                         ? harp_datasource_protocol_1.getPropertyValue(outlineTechnique.secondaryColor, displayZoomLevel)
-                        : "0x000000");
+                        : 0x000000);
                     outlineMaterial.uniforms.diffuse.value = outlineColor;
+                    if (outlineTechnique.secondaryCaps !== undefined) {
+                        outlineMaterial.caps = outlineTechnique.secondaryCaps;
+                    }
                     const outlineObj = new ObjectCtor(bufferGeometry, outlineMaterial);
                     outlineObj.renderOrder =
                         outlineTechnique.secondaryRenderOrder !== undefined
@@ -29482,10 +30122,15 @@ class TileGeometryCreator {
                             lineMaterial.color.set(harp_datasource_protocol_1.getPropertyValue(outlineTechnique.secondaryColor, mapView.zoomLevel));
                         }
                         if (outlineTechnique.secondaryWidth !== undefined) {
-                            lineMaterial.lineWidth =
-                                harp_datasource_protocol_1.getPropertyValue(outlineTechnique.secondaryWidth, mapView.zoomLevel, mapView.pixelToWorld) *
-                                    unitFactor *
-                                    0.5;
+                            const techniqueLineWidth = harp_datasource_protocol_1.getPropertyValue(outlineTechnique.lineWidth, mapView.zoomLevel, mapView.pixelToWorld);
+                            const techniqueSecondaryWidth = harp_datasource_protocol_1.getPropertyValue(outlineTechnique.secondaryWidth, mapView.zoomLevel, mapView.pixelToWorld);
+                            const techniqueOpacity = harp_datasource_protocol_1.getPropertyValue(outlineTechnique.opacity, mapView.zoomLevel);
+                            // hide outline when it's equal or smaller then line to avoid subpixel contour
+                            const lineWidth = techniqueSecondaryWidth <= techniqueLineWidth &&
+                                (techniqueOpacity === undefined || techniqueOpacity === 1)
+                                ? 0
+                                : techniqueSecondaryWidth;
+                            lineMaterial.lineWidth = lineWidth * unitFactor * 0.5;
                         }
                     });
                     this.registerTileObject(tile, outlineObj, technique.kind);
@@ -29503,134 +30148,9 @@ class TileGeometryCreator {
         }
     }
     /**
-     * Gets the appropriate [[TextRenderStyle]] to use for a label. Depends heavily on the label's
-     * [[Technique]] and the current zoomLevel.
-     *
-     * @param technique Label's technique.
-     * @param techniqueIdx Label's technique index.
-     */
-    getRenderStyle(tile, technique) {
-        const mapView = tile.mapView;
-        const dataSource = tile.dataSource;
-        const zoomLevel = mapView.zoomLevel;
-        const cacheId = TextStyleCache_1.computeStyleCacheId(dataSource.name, technique, Math.floor(zoomLevel));
-        let renderStyle = mapView.textRenderStyleCache.get(cacheId);
-        if (renderStyle === undefined) {
-            const defaultRenderParams = mapView.textElementsRenderer !== undefined
-                ? mapView.textElementsRenderer.defaultStyle.renderParams
-                : {
-                    fontSize: {
-                        unit: harp_text_canvas_1.FontUnit.Pixel,
-                        size: 32,
-                        backgroundSize: 8
-                    }
-                };
-            if (technique.color !== undefined) {
-                const hexColor = harp_datasource_protocol_1.getPropertyValue(technique.color, Math.floor(zoomLevel));
-                TileGeometryCreator.m_colorMap.set(cacheId, ColorCache_1.ColorCache.instance.getColor(hexColor));
-            }
-            if (technique.backgroundColor !== undefined) {
-                const hexBgColor = harp_datasource_protocol_1.getPropertyValue(technique.backgroundColor, Math.floor(zoomLevel));
-                TileGeometryCreator.m_colorMap.set(cacheId + "_bg", ColorCache_1.ColorCache.instance.getColor(hexBgColor));
-            }
-            const renderParams = {
-                fontName: harp_utils_1.getOptionValue(technique.fontName, defaultRenderParams.fontName),
-                fontSize: {
-                    unit: harp_text_canvas_1.FontUnit.Pixel,
-                    size: technique.size !== undefined
-                        ? harp_datasource_protocol_1.getPropertyValue(technique.size, Math.floor(zoomLevel))
-                        : defaultRenderParams.fontSize.size,
-                    backgroundSize: technique.backgroundSize !== undefined
-                        ? harp_datasource_protocol_1.getPropertyValue(technique.backgroundSize, Math.floor(zoomLevel))
-                        : defaultRenderParams.fontSize.backgroundSize
-                },
-                fontStyle: technique.fontStyle === "Regular" ||
-                    technique.fontStyle === "Bold" ||
-                    technique.fontStyle === "Italic" ||
-                    technique.fontStyle === "BoldItalic"
-                    ? harp_text_canvas_1.FontStyle[technique.fontStyle]
-                    : defaultRenderParams.fontStyle,
-                fontVariant: technique.fontVariant === "Regular" ||
-                    technique.fontVariant === "AllCaps" ||
-                    technique.fontVariant === "SmallCaps"
-                    ? harp_text_canvas_1.FontVariant[technique.fontVariant]
-                    : defaultRenderParams.fontVariant,
-                rotation: harp_utils_1.getOptionValue(technique.rotation, defaultRenderParams.rotation),
-                color: harp_utils_1.getOptionValue(TileGeometryCreator.m_colorMap.get(cacheId), defaultRenderParams.color),
-                backgroundColor: harp_utils_1.getOptionValue(TileGeometryCreator.m_colorMap.get(cacheId + "_bg"), defaultRenderParams.backgroundColor),
-                opacity: technique.opacity !== undefined
-                    ? harp_datasource_protocol_1.getPropertyValue(technique.opacity, Math.floor(zoomLevel))
-                    : defaultRenderParams.opacity,
-                backgroundOpacity: technique.backgroundOpacity !== undefined
-                    ? harp_datasource_protocol_1.getPropertyValue(technique.backgroundOpacity, Math.floor(zoomLevel))
-                    : technique.backgroundColor !== undefined &&
-                        (technique.backgroundSize !== undefined &&
-                            harp_datasource_protocol_1.getPropertyValue(technique.backgroundSize, Math.floor(zoomLevel)) > 0)
-                        ? 1.0 // make label opaque when backgroundColor and backgroundSize are set
-                        : defaultRenderParams.backgroundOpacity
-            };
-            const themeRenderParams = mapView.textElementsRenderer !== undefined
-                ? mapView.textElementsRenderer.getTextElementStyle(technique.style)
-                    .renderParams
-                : {};
-            renderStyle = new harp_text_canvas_1.TextRenderStyle(Object.assign(Object.assign({}, themeRenderParams), renderParams));
-            mapView.textRenderStyleCache.set(cacheId, renderStyle);
-        }
-        return renderStyle;
-    }
-    /**
-     * Gets the appropriate [[TextRenderStyle]] to use for a label. Depends heavily on the label's
-     * [[Technique]] and the current zoomLevel.
-     *
-     * @param tile The [[Tile]] to process.
-     * @param technique Label's technique.
-     */
-    getLayoutStyle(tile, technique) {
-        const mapView = tile.mapView;
-        const dataSource = tile.dataSource;
-        const zoomLevel = mapView.zoomLevel;
-        const cacheId = TextStyleCache_1.computeStyleCacheId(dataSource.name, technique, Math.floor(zoomLevel));
-        let layoutStyle = mapView.textLayoutStyleCache.get(cacheId);
-        if (layoutStyle === undefined) {
-            const defaultLayoutParams = mapView.textElementsRenderer !== undefined
-                ? mapView.textElementsRenderer.defaultStyle.layoutParams
-                : {};
-            const layoutParams = {
-                tracking: harp_utils_1.getOptionValue(technique.tracking, defaultLayoutParams.tracking),
-                leading: harp_utils_1.getOptionValue(technique.leading, defaultLayoutParams.leading),
-                maxLines: harp_utils_1.getOptionValue(technique.maxLines, defaultLayoutParams.maxLines),
-                lineWidth: harp_utils_1.getOptionValue(technique.lineWidth, defaultLayoutParams.lineWidth),
-                canvasRotation: harp_utils_1.getOptionValue(technique.canvasRotation, defaultLayoutParams.canvasRotation),
-                lineRotation: harp_utils_1.getOptionValue(technique.lineRotation, defaultLayoutParams.lineRotation),
-                wrappingMode: technique.wrappingMode === "None" ||
-                    technique.wrappingMode === "Character" ||
-                    technique.wrappingMode === "Word"
-                    ? harp_text_canvas_1.WrappingMode[technique.wrappingMode]
-                    : defaultLayoutParams.wrappingMode,
-                horizontalAlignment: technique.hAlignment === "Left" ||
-                    technique.hAlignment === "Center" ||
-                    technique.hAlignment === "Right"
-                    ? harp_text_canvas_1.HorizontalAlignment[technique.hAlignment]
-                    : defaultLayoutParams.horizontalAlignment,
-                verticalAlignment: technique.vAlignment === "Above" ||
-                    technique.vAlignment === "Center" ||
-                    technique.vAlignment === "Below"
-                    ? harp_text_canvas_1.VerticalAlignment[technique.vAlignment]
-                    : defaultLayoutParams.verticalAlignment
-            };
-            const themeLayoutParams = mapView.textElementsRenderer !== undefined
-                ? mapView.textElementsRenderer.getTextElementStyle(technique.style)
-                    .layoutParams
-                : {};
-            layoutStyle = new harp_text_canvas_1.TextLayoutStyle(Object.assign(Object.assign({}, themeLayoutParams), layoutParams));
-            mapView.textLayoutStyleCache.set(cacheId, layoutStyle);
-        }
-        return layoutStyle;
-    }
-    /**
      * Creates and add a background plane for the tile.
      */
-    addGroundPlane(tile) {
+    addGroundPlane(tile, renderOrder) {
         const mapView = tile.mapView;
         const dataSource = tile.dataSource;
         const projection = tile.projection;
@@ -29654,7 +30174,7 @@ class TileGeometryCreator {
                     .projectPoint(new harp_geoutils_1.GeoCoordinates(north, east), tmpV)
                     .toArray()
             ]), 3);
-            g.addAttribute("position", posAttr);
+            g.setAttribute("position", posAttr);
             g.setIndex(new THREE.BufferAttribute(new Uint16Array([0, 1, 2, 2, 1, 3]), 1));
             const modifier = new SphericalGeometrySubdivisionModifier_1.SphericalGeometrySubdivisionModifier(THREE.Math.degToRad(10), sourceProjection);
             modifier.modify(g);
@@ -29673,14 +30193,14 @@ class TileGeometryCreator {
                 depthWrite: true
             });
             const mesh = new THREE.Mesh(g, material);
-            mesh.renderOrder = Number.MIN_SAFE_INTEGER;
+            mesh.renderOrder = renderOrder;
             this.registerTileObject(tile, mesh, harp_datasource_protocol_1.GeometryKind.Background);
             tile.objects.push(mesh);
         }
         else {
             // Add a ground plane to the tile.
             tile.boundingBox.getSize(tmpV);
-            const groundPlane = this.createPlane(tmpV.x, tmpV.y, tile.center, color, true);
+            const groundPlane = this.createPlane(tmpV.x, tmpV.y, tile.center, color, true, renderOrder);
             this.registerTileObject(tile, groundPlane, harp_datasource_protocol_1.GeometryKind.Background);
             tile.objects.push(groundPlane);
         }
@@ -29725,7 +30245,7 @@ class TileGeometryCreator {
      * @param {boolean} isVisible `True` to make the mesh visible.
      * @returns {THREE.Mesh} The created plane.
      */
-    createPlane(width, height, planeCenter, colorHex, isVisible) {
+    createPlane(width, height, planeCenter, colorHex, isVisible, renderOrder) {
         const geometry = new THREE.PlaneGeometry(width, height, 1);
         // TODO cache the material HARP-4207
         const material = new harp_materials_1.MapMeshBasicMaterial({
@@ -29736,14 +30256,14 @@ class TileGeometryCreator {
         const plane = new THREE.Mesh(geometry, material);
         plane.position.copy(planeCenter);
         // Render before everything else
-        plane.renderOrder = Number.MIN_SAFE_INTEGER;
+        plane.renderOrder = renderOrder;
         return plane;
     }
     /**
      * Pass the feature data on to the object, so it can be used in picking
      * `MapView.intersectMapObjects()`. Do not pass the feature data if the technique is a
-     * dashed-line or a solid-line, because the line picking functionality for the lines is not
-     * object based, but tile based.
+     * solid-line, because the line picking functionality for the lines is not object based, but
+     * tile based.
      *
      * @param srcGeometry The original [[Geometry]].
      * @param technique The corresponding [[Technique]].
@@ -29753,8 +30273,7 @@ class TileGeometryCreator {
         if (((srcGeometry.featureIds !== undefined && srcGeometry.featureIds.length > 0) ||
             harp_datasource_protocol_1.isCirclesTechnique(technique) ||
             harp_datasource_protocol_1.isSquaresTechnique(technique)) &&
-            !harp_datasource_protocol_1.isSolidLineTechnique(technique) &&
-            !harp_datasource_protocol_1.isDashedLineTechnique(technique)) {
+            !harp_datasource_protocol_1.isSolidLineTechnique(technique)) {
             const featureData = {
                 geometryType: srcGeometry.type,
                 ids: srcGeometry.featureIds,
@@ -29840,10 +30359,6 @@ class TileGeometryCreator {
     }
 }
 exports.TileGeometryCreator = TileGeometryCreator;
-/**
- * Cache for named colors.
- */
-TileGeometryCreator.m_colorMap = new Map();
 
 
 /***/ }),
@@ -29915,7 +30430,6 @@ var TileGeometryLoader;
                 geometryKind = harp_datasource_protocol_1.GeometryKind.Area;
             }
             else if (harp_datasource_protocol_1.isLineTechnique(technique) ||
-                harp_datasource_protocol_1.isDashedLineTechnique(technique) ||
                 harp_datasource_protocol_1.isSolidLineTechnique(technique) ||
                 harp_datasource_protocol_1.isSegmentsTechnique(technique) ||
                 harp_datasource_protocol_1.isExtrudedLineTechnique(technique)) {
@@ -30313,7 +30827,6 @@ exports.SimpleTileGeometryManager = SimpleTileGeometryManager;
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 const harp_datasource_protocol_1 = __webpack_require__(/*! @here/harp-datasource-protocol */ "../harp-datasource-protocol/index.ts");
-const THREE = __webpack_require__(/*! three */ "three");
 /**
  * Overlays the specified object's geometry on the elevation represented by the given displacement
  * map .
@@ -30330,22 +30843,19 @@ function overlayObject(object, displacementMap) {
         material.displacementMap = displacementMap;
     }
 }
-const worldCoords = new THREE.Vector3();
 /**
  * Overlays the specified coordinates on top of elevation data if available.
  *
- * @param tileCoords World coordinates relative to the `tile` center.
+ * @param worldCoords World coordinates to overlay.
  * @param elevationProvider Used to get elevation data.
  * @param tile The tile to which the coordinates are relative.
  */
-function overlayPosition(tileCoords, elevationProvider, tile) {
-    worldCoords.copy(tileCoords).add(tile.center);
+function overlayPosition(worldCoords, elevationProvider, tile) {
     const geoCoords = tile.mapView.projection.unprojectPoint(worldCoords);
     const height = elevationProvider.getHeight(geoCoords);
     if (height !== undefined) {
         geoCoords.altitude = height;
         tile.mapView.projection.projectPoint(geoCoords, worldCoords);
-        tileCoords.copy(worldCoords).sub(tile.center);
     }
 }
 /**
@@ -30640,9 +31150,9 @@ class ImageCache {
         }
         const imageLoader = new THREE.ImageLoader();
         imageItem.loadingPromise = new Promise(resolve => {
-            logger.log(`Loading image: ${imageItem.url}`);
+            logger.debug(`Loading image: ${imageItem.url}`);
             imageLoader.load(imageItem.url, image => {
-                logger.log(`... finished loading image: ${imageItem.url}`);
+                logger.debug(`... finished loading image: ${imageItem.url}`);
                 this.renderImage(imageItem, image)
                     .then(() => {
                     imageItem.loadingPromise = undefined;
@@ -30686,10 +31196,10 @@ class ImageCache {
                     premultiplyAlpha: "default",
                     imageOrientation: "flipY"
                 };
-                logger.log(`Creating bitmap image: ${imageItem.url}`);
+                logger.debug(`Creating bitmap image: ${imageItem.url}`);
                 createImageBitmap(image, 0, 0, image.width, image.height, options)
                     .then(imageBitmap => {
-                    logger.log(`... finished creating bitmap image: ${imageItem.url}`);
+                    logger.debug(`... finished creating bitmap image: ${imageItem.url}`);
                     imageItem.loadingPromise = undefined;
                     imageItem.imageData = imageBitmap;
                     imageItem.loaded = true;
@@ -30715,7 +31225,7 @@ class ImageCache {
                     canvas.height = image.height;
                     const context = canvas.getContext("2d");
                     if (context !== null) {
-                        logger.log(
+                        logger.debug(
                         // tslint:disable-next-line: max-line-length
                         `... finished creating bitmap image in canvas: ${imageItem.url} ${image}`);
                         context.drawImage(image, 0, 0, image.width, image.height, 0, 0, canvas.width, canvas.height);
@@ -31254,9 +31764,9 @@ class BoxBuffer {
         if (newSize !== undefined && (forceResize === true || newSize > this.size)) {
             this.resizeBuffer(newSize);
         }
-        this.geometry.addAttribute("position", this.positionAttribute);
-        this.geometry.addAttribute("color", this.colorAttribute);
-        this.geometry.addAttribute("uv", this.uvAttribute);
+        this.geometry.setAttribute("position", this.positionAttribute);
+        this.geometry.setAttribute("color", this.colorAttribute);
+        this.geometry.setAttribute("uv", this.uvAttribute);
         this.geometry.setIndex(this.indexAttribute);
         this.geometry.addGroup(0, this.indexAttribute.count);
         if (this.internalMesh === undefined) {
@@ -31332,7 +31842,7 @@ class BoxBuffer {
         else {
             this.positionAttribute = new THREE.BufferAttribute(newPositionArray, NUM_POSITION_VALUES_PER_VERTEX);
             this.positionAttribute.count = 0;
-            this.positionAttribute.setDynamic(true);
+            this.positionAttribute.setUsage(THREE.DynamicDrawUsage);
         }
         const newColorArray = new Uint8Array(newSize * NUM_VERTICES_PER_ELEMENT * NUM_COLOR_VALUES_PER_VERTEX);
         if (this.colorAttribute !== undefined) {
@@ -31344,7 +31854,7 @@ class BoxBuffer {
         else {
             this.colorAttribute = new THREE.BufferAttribute(newColorArray, NUM_COLOR_VALUES_PER_VERTEX, true);
             this.colorAttribute.count = 0;
-            this.colorAttribute.setDynamic(true);
+            this.colorAttribute.setUsage(THREE.DynamicDrawUsage);
         }
         const newUvArray = new Float32Array(newSize * NUM_VERTICES_PER_ELEMENT * NUM_UV_VALUES_PER_VERTEX);
         if (this.uvAttribute !== undefined) {
@@ -31356,7 +31866,7 @@ class BoxBuffer {
         else {
             this.uvAttribute = new THREE.BufferAttribute(newUvArray, NUM_UV_VALUES_PER_VERTEX);
             this.uvAttribute.count = 0;
-            this.uvAttribute.setDynamic(true);
+            this.uvAttribute.setUsage(THREE.DynamicDrawUsage);
         }
         const numIndexValues = newSize * NUM_INDICES_PER_ELEMENT * NUM_INDEX_VALUES_PER_VERTEX;
         const newIndexArray = numIndexValues > 65535
@@ -31371,7 +31881,7 @@ class BoxBuffer {
         else {
             this.indexAttribute = new THREE.BufferAttribute(newIndexArray, NUM_INDEX_VALUES_PER_VERTEX);
             this.indexAttribute.count = 0;
-            this.indexAttribute.setDynamic(true);
+            this.indexAttribute.setUsage(THREE.DynamicDrawUsage);
         }
         this.m_size = newSize;
     }
@@ -31705,10 +32215,8 @@ const harp_datasource_protocol_1 = __webpack_require__(/*! @here/harp-datasource
 const harp_text_canvas_1 = __webpack_require__(/*! @here/harp-text-canvas */ "../harp-text-canvas/index.ts");
 const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
 const THREE = __webpack_require__(/*! three */ "three");
-const ColorCache_1 = __webpack_require__(/*! ../ColorCache */ "../harp-mapview/lib/ColorCache.ts");
 const TextElement_1 = __webpack_require__(/*! ../text/TextElement */ "../harp-mapview/lib/text/TextElement.ts");
 const TextElementsRenderer_1 = __webpack_require__(/*! ../text/TextElementsRenderer */ "../harp-mapview/lib/text/TextElementsRenderer.ts");
-const TextStyleCache_1 = __webpack_require__(/*! ../text/TextStyleCache */ "../harp-mapview/lib/text/TextStyleCache.ts");
 const logger = harp_utils_1.LoggerManager.instance.create("PoiManager");
 /**
  * POI manager class, responsible for loading the [[PoiGeometry]] objects from the [[DecodedTile]],
@@ -31724,7 +32232,6 @@ class PoiManager {
         this.mapView = mapView;
         this.m_imageTextures = new Map();
         this.m_poiShieldGroups = new Map();
-        this.m_colorMap = new Map();
     }
     /**
      * Warn about a missing POI table name, but only once.
@@ -31772,6 +32279,7 @@ class PoiManager {
      */
     addPois(tile, decodedTile) {
         const poiGeometries = harp_utils_1.assertExists(decodedTile.poiGeometries);
+        const worldOffsetX = tile.computeWorldOffsetX();
         for (const poiGeometry of poiGeometries) {
             harp_utils_1.assert(poiGeometry.technique !== undefined);
             const techniqueIndex = harp_utils_1.assertExists(poiGeometry.technique);
@@ -31787,10 +32295,10 @@ class PoiManager {
             }
             const positions = new THREE.BufferAttribute(new Float32Array(poiGeometry.positions.buffer), poiGeometry.positions.itemCount);
             if (harp_datasource_protocol_1.isLineMarkerTechnique(technique) && positions.count > 0) {
-                this.addLineMarker(tile, poiGeometry, technique, positions);
+                this.addLineMarker(tile, poiGeometry, technique, positions, worldOffsetX);
             }
             else if (harp_datasource_protocol_1.isPoiTechnique(technique)) {
-                this.addPoi(tile, poiGeometry, technique, techniqueIndex, positions);
+                this.addPoi(tile, poiGeometry, technique, positions, worldOffsetX);
             }
         }
     }
@@ -31816,7 +32324,7 @@ class PoiManager {
                 return;
             }
             try {
-                logger.log(`addTextureAtlas: Loading textureAtlas '${atlas}' for image '${imageName}'`);
+                logger.debug(`addTextureAtlas: Loading textureAtlas '${atlas}' for image '${imageName}'`);
                 for (const textureName of Object.getOwnPropertyNames(jsonAtlas)) {
                     const imageTextureDef = jsonAtlas[textureName];
                     const imageTexture = {
@@ -31896,6 +32404,8 @@ class PoiManager {
             // The PoiTable is still loading, we have to try again.
             return false;
         }
+        // Remove poiTableName to mark this POI as processed.
+        poiInfo.poiTableName = undefined;
         // PoiTable not found or can not be loaded.
         if (poiTable === undefined || !poiTable.loadedOk) {
             PoiManager.notifyMissingPoiTable(poiTableName, poiTable);
@@ -31946,7 +32456,7 @@ class PoiManager {
      * having the same visual all get their `shieldGroupIndex` set appropriately, so it can be taken
      * care of later that not too many of them are rendered (obey `minDistance` attribute).
      */
-    addLineMarker(tile, poiGeometry, technique, positions) {
+    addLineMarker(tile, poiGeometry, technique, positions, worldOffsetX) {
         let imageTextureName = technique.imageTexture !== undefined
             ? harp_datasource_protocol_1.composeTechniqueTextureName(technique.imageTexture, technique)
             : undefined;
@@ -31974,7 +32484,7 @@ class PoiManager {
         // text = groupKey + ": " + text;
         const positionArray = [];
         for (let i = 0; i < positions.count; i += 3) {
-            const x = positions.getX(i);
+            const x = positions.getX(i) + worldOffsetX;
             const y = positions.getY(i);
             const z = positions.getZ(i);
             positionArray.push(new THREE.Vector3(x, y, z));
@@ -31989,7 +32499,7 @@ class PoiManager {
     /**
      * Create and add POI [[TextElement]]s to tile with a series of positions.
      */
-    addPoi(tile, poiGeometry, technique, techniqueIdx, positions) {
+    addPoi(tile, poiGeometry, technique, positions, worldOffsetX) {
         if (poiGeometry.stringCatalog === undefined) {
             return;
         }
@@ -32000,7 +32510,7 @@ class PoiManager {
         const poiTableName = poiTechnique.poiTable;
         let poiName = poiTechnique.poiName;
         for (let i = 0; i < positions.count; ++i) {
-            const x = positions.getX(i);
+            const x = positions.getX(i) + worldOffsetX;
             const y = positions.getY(i);
             const z = positions.getZ(i);
             harp_utils_1.assert(poiGeometry.texts.length > i);
@@ -32030,6 +32540,7 @@ class PoiManager {
      * priority attribute).
      */
     checkCreateTextElement(tile, text, technique, imageTextureName, poiTableName, poiName, shieldGroupIndex, featureId, x, y, z, userData) {
+        const textElementsRenderer = this.mapView.textElementsRenderer;
         const priority = technique.priority !== undefined ? technique.priority : 0;
         const positions = Array.isArray(x) ? x : new THREE.Vector3(x, y, z);
         // The current zoomlevel of mapview. Since this method is called for all tiles in the
@@ -32044,7 +32555,8 @@ class PoiManager {
             : technique.fadeFar;
         const xOffset = harp_datasource_protocol_1.getPropertyValue(technique.xOffset, displayZoomLevel);
         const yOffset = harp_datasource_protocol_1.getPropertyValue(technique.yOffset, displayZoomLevel);
-        const textElement = new TextElement_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(text), positions, this.getRenderStyle(tile.dataSource.name, technique), this.getLayoutStyle(tile.dataSource.name, technique), harp_datasource_protocol_1.getPropertyValue(priority, displayZoomLevel), xOffset !== undefined ? xOffset : 0.0, yOffset !== undefined ? yOffset : 0.0, featureId, technique.style, fadeNear, fadeFar);
+        const textElement = new TextElement_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(text), positions, textElementsRenderer.styleCache.getRenderStyle(tile, technique), textElementsRenderer.styleCache.getLayoutStyle(tile, technique), harp_datasource_protocol_1.getPropertyValue(priority, displayZoomLevel), xOffset !== undefined ? xOffset : 0.0, yOffset !== undefined ? yOffset : 0.0, featureId, technique.style, fadeNear, fadeFar);
+        textElement.isPointLabel = true;
         textElement.mayOverlap = technique.textMayOverlap === true;
         textElement.reserveSpace = technique.textReserveSpace !== false;
         textElement.alwaysOnTop = technique.alwaysOnTop === true;
@@ -32100,116 +32612,7 @@ class PoiManager {
             technique.distanceScale !== undefined
                 ? technique.distanceScale
                 : TextElementsRenderer_1.DEFAULT_TEXT_DISTANCE_SCALE;
-        textElement.isPointLabel = true;
         return textElement;
-    }
-    getRenderStyle(dataSourceName, technique) {
-        const mapView = this.mapView;
-        const zoomLevel = mapView.zoomLevel;
-        const cacheId = TextStyleCache_1.computeStyleCacheId(dataSourceName, technique, Math.floor(zoomLevel));
-        const renderer = this.mapView.textElementsRenderer;
-        let renderStyle = mapView.textRenderStyleCache.get(cacheId);
-        if (renderStyle === undefined) {
-            const defaultRenderParams = renderer !== undefined
-                ? renderer.defaultStyle.renderParams
-                : {
-                    fontSize: {
-                        unit: harp_text_canvas_1.FontUnit.Pixel,
-                        size: 32,
-                        backgroundSize: 8
-                    }
-                };
-            if (technique.color !== undefined) {
-                const hexColor = harp_datasource_protocol_1.getPropertyValue(technique.color, Math.floor(zoomLevel));
-                this.m_colorMap.set(cacheId, ColorCache_1.ColorCache.instance.getColor(hexColor));
-            }
-            if (technique.backgroundColor !== undefined) {
-                const hexBgColor = harp_datasource_protocol_1.getPropertyValue(technique.backgroundColor, Math.floor(zoomLevel));
-                this.m_colorMap.set(cacheId + "_bg", ColorCache_1.ColorCache.instance.getColor(hexBgColor));
-            }
-            const renderParams = {
-                fontName: harp_utils_1.getOptionValue(technique.fontName, defaultRenderParams.fontName),
-                fontSize: {
-                    unit: harp_text_canvas_1.FontUnit.Pixel,
-                    size: technique.size !== undefined
-                        ? harp_datasource_protocol_1.getPropertyValue(technique.size, Math.floor(zoomLevel))
-                        : defaultRenderParams.fontSize.size,
-                    backgroundSize: technique.backgroundSize !== undefined
-                        ? harp_datasource_protocol_1.getPropertyValue(technique.backgroundSize, Math.floor(zoomLevel))
-                        : defaultRenderParams.fontSize.backgroundSize
-                },
-                fontStyle: technique.fontStyle === "Regular" ||
-                    technique.fontStyle === "Bold" ||
-                    technique.fontStyle === "Italic" ||
-                    technique.fontStyle === "BoldItalic"
-                    ? harp_text_canvas_1.FontStyle[technique.fontStyle]
-                    : defaultRenderParams.fontStyle,
-                fontVariant: technique.fontVariant === "Regular" ||
-                    technique.fontVariant === "AllCaps" ||
-                    technique.fontVariant === "SmallCaps"
-                    ? harp_text_canvas_1.FontVariant[technique.fontVariant]
-                    : defaultRenderParams.fontVariant,
-                rotation: harp_utils_1.getOptionValue(technique.rotation, defaultRenderParams.rotation),
-                color: harp_utils_1.getOptionValue(this.m_colorMap.get(cacheId), defaultRenderParams.color),
-                backgroundColor: harp_utils_1.getOptionValue(this.m_colorMap.get(cacheId + "_bg"), defaultRenderParams.backgroundColor),
-                opacity: technique.opacity !== undefined
-                    ? harp_datasource_protocol_1.getPropertyValue(technique.opacity, Math.floor(zoomLevel))
-                    : defaultRenderParams.opacity,
-                backgroundOpacity: technique.backgroundOpacity !== undefined
-                    ? harp_datasource_protocol_1.getPropertyValue(technique.backgroundOpacity, Math.floor(zoomLevel))
-                    : technique.backgroundColor !== undefined &&
-                        (technique.backgroundSize !== undefined &&
-                            harp_datasource_protocol_1.getPropertyValue(technique.backgroundSize, Math.floor(zoomLevel)) > 0)
-                        ? 1.0 // make label opaque when backgroundColor and backgroundSize are set
-                        : defaultRenderParams.backgroundOpacity
-            };
-            const themeRenderParams = mapView.textElementsRenderer !== undefined
-                ? mapView.textElementsRenderer.getTextElementStyle(technique.style)
-                    .renderParams
-                : {};
-            renderStyle = new harp_text_canvas_1.TextRenderStyle(Object.assign(Object.assign({}, themeRenderParams), renderParams));
-            mapView.textRenderStyleCache.set(cacheId, renderStyle);
-        }
-        return renderStyle;
-    }
-    getLayoutStyle(dataSourceName, technique) {
-        const floorZoomLevel = Math.floor(this.mapView.zoomLevel);
-        const cacheId = TextStyleCache_1.computeStyleCacheId(dataSourceName, technique, floorZoomLevel);
-        const renderer = this.mapView.textElementsRenderer;
-        let layoutStyle = this.mapView.textLayoutStyleCache.get(cacheId);
-        if (layoutStyle === undefined) {
-            const defaultLayoutParams = renderer !== undefined ? renderer.defaultStyle.layoutParams : {};
-            const hAlignment = harp_datasource_protocol_1.getPropertyValue(technique.hAlignment, floorZoomLevel);
-            const vAlignment = harp_datasource_protocol_1.getPropertyValue(technique.vAlignment, floorZoomLevel);
-            const horizontalAlignment = hAlignment === "Left" || hAlignment === "Center" || hAlignment === "Right"
-                ? harp_text_canvas_1.HorizontalAlignment[hAlignment]
-                : defaultLayoutParams.horizontalAlignment;
-            const verticalAlignment = vAlignment === "Above" || vAlignment === "Center" || vAlignment === "Below"
-                ? harp_text_canvas_1.VerticalAlignment[vAlignment]
-                : defaultLayoutParams.verticalAlignment;
-            const layoutParams = {
-                tracking: harp_utils_1.getOptionValue(technique.tracking, defaultLayoutParams.tracking),
-                leading: harp_utils_1.getOptionValue(technique.leading, defaultLayoutParams.leading),
-                maxLines: harp_utils_1.getOptionValue(technique.maxLines, defaultLayoutParams.maxLines),
-                lineWidth: harp_utils_1.getOptionValue(technique.lineWidth, defaultLayoutParams.lineWidth),
-                canvasRotation: harp_utils_1.getOptionValue(technique.canvasRotation, defaultLayoutParams.canvasRotation),
-                lineRotation: harp_utils_1.getOptionValue(technique.lineRotation, defaultLayoutParams.lineRotation),
-                wrappingMode: technique.wrappingMode === "None" ||
-                    technique.wrappingMode === "Character" ||
-                    technique.wrappingMode === "Word"
-                    ? harp_text_canvas_1.WrappingMode[technique.wrappingMode]
-                    : defaultLayoutParams.wrappingMode,
-                horizontalAlignment,
-                verticalAlignment
-            };
-            const themeLayoutParams = this.mapView.textElementsRenderer !== undefined
-                ? this.mapView.textElementsRenderer.getTextElementStyle(technique.style)
-                    .layoutParams
-                : {};
-            layoutStyle = new harp_text_canvas_1.TextLayoutStyle(Object.assign(Object.assign({}, themeLayoutParams), layoutParams));
-            this.mapView.textLayoutStyleCache.set(cacheId, layoutStyle);
-        }
-        return layoutStyle;
     }
 }
 exports.PoiManager = PoiManager;
@@ -32395,9 +32798,10 @@ class PoiRenderBuffer {
      *
      * @param poiInfo PoiInfo containing information for rendering the POI icon.
      * @param screenBox Box to render icon into in 2D coordinates.
+     * @param viewDistance Box's distance to camera.
      * @param opacity Opacity of icon to allow fade in/out.
      */
-    addPoi(poiInfo, screenBox, opacity) {
+    addPoi(poiInfo, screenBox, viewDistance, opacity) {
         const batchIndex = this.registerPoi(poiInfo);
         harp_utils_1.assert(batchIndex >= 0);
         if (batchIndex < 0) {
@@ -32407,7 +32811,7 @@ class PoiRenderBuffer {
         if (this.batches[batchIndex].boxBuffer === undefined) {
             this.batches[batchIndex].init();
         }
-        this.batches[batchIndex].boxBuffer.addBox(screenBox, poiInfo.uvBox, this.batches[batchIndex].color, opacity, poiInfo.textElement.renderDistance, poiInfo.textElement);
+        this.batches[batchIndex].boxBuffer.addBox(screenBox, poiInfo.uvBox, this.batches[batchIndex].color, opacity, viewDistance, poiInfo.textElement);
         return batchIndex;
     }
     /**
@@ -32556,26 +32960,19 @@ class PoiRenderer {
      * @param poiInfo PoiInfo containing information for rendering the POI icon.
      * @param screenPosition Position on screen (2D):
      * @param screenCollisions Object handling the collision checks for screen-aligned 2D boxes.
+     * @param viewDistance Box's distance to camera.
      * @param scale Scaling factor to apply to text and icon.
      * @param allocateScreenSpace If `true` screen space will be allocated for the icon.
      * @param opacity Opacity of icon to allow fade in/out.
      */
-    renderPoi(poiInfo, screenPosition, screenCollisions, scale, allocateScreenSpace, opacity, zoomLevel) {
+    renderPoi(poiInfo, screenPosition, screenCollisions, viewDistance, scale, allocateScreenSpace, opacity, zoomLevel) {
         harp_utils_1.assert(poiInfo.poiRenderBatch !== undefined);
         if (this.computeIconScreenBox(poiInfo, screenPosition, scale, zoomLevel, this.m_tempScreenBox)) {
             if (allocateScreenSpace) {
                 screenCollisions.allocate(this.m_tempScreenBox);
             }
-            this.m_renderBuffer.addPoi(poiInfo, this.m_tempScreenBox, opacity);
+            this.m_renderBuffer.addPoi(poiInfo, this.m_tempScreenBox, viewDistance, opacity);
         }
-    }
-    /**
-     * Return 'true' if the POI has been successfully prepared for rendering.
-     *
-     * @param poiInfo PoiInfo containing information for rendering the POI icon.
-     */
-    poiIsRenderable(poiInfo) {
-        return poiInfo.poiRenderBatch !== undefined;
     }
     /**
      * Update the geometry of all [[PoiRenderBuffer]]es. Called before rendering.
@@ -32617,7 +33014,7 @@ class PoiRenderer {
         const iconXOffset = harp_datasource_protocol_1.getPropertyValue(technique.iconXOffset, zoomLevel);
         const iconYOffset = harp_datasource_protocol_1.getPropertyValue(technique.iconYOffset, zoomLevel);
         const centerX = screenPosition.x + (typeof iconXOffset === "number" ? iconXOffset : 0);
-        const centerY = screenPosition.y + (typeof iconXOffset === "number" ? iconYOffset : 0);
+        const centerY = screenPosition.y + (typeof iconYOffset === "number" ? iconYOffset : 0);
         screenBox.x = centerX - width / 2;
         screenBox.y = centerY - height / 2;
         screenBox.w = width;
@@ -32639,8 +33036,6 @@ class PoiRenderer {
         }
         if (poiInfo.poiTableName !== undefined) {
             if (this.mapView.poiManager.updatePoiFromPoiTable(pointLabel)) {
-                // Remove poiTableName to mark this POI as processed.
-                poiInfo.poiTableName = undefined;
                 if (!pointLabel.visible) {
                     // PoiTable set this POI to not visible.
                     return;
@@ -32964,7 +33359,7 @@ class PoiTable {
         }
         this.startLoading();
         try {
-            logger.log(`load: Loading POI table '${poiTableUrl}' for table '${this.name}'`);
+            logger.debug(`load: Loading POI table '${poiTableUrl}' for table '${this.name}'`);
             if (jsonPoiTable.poiList !== undefined && Array.isArray(jsonPoiTable.poiList)) {
                 for (const tableEntry of jsonPoiTable.poiList) {
                     if (PoiTableEntry.verifyJSON(tableEntry)) {
@@ -33050,12 +33445,6 @@ class PoiTableManager {
                 this.startLoading();
                 // Gather promises to signal the success of having loaded them all
                 const loadPromises = new Array();
-                // Ensure that all resources referenced in theme by relative URLs are in fact
-                // relative to theme.
-                const themeUrl = theme.url;
-                const childUrlResolver = themeUrl === undefined
-                    ? undefined
-                    : harp_utils_1.composeUrlResolvers((childUrl) => harp_utils_1.resolveReferenceUrl(themeUrl, childUrl), harp_utils_1.defaultUrlResolver);
                 theme.poiTables.forEach((poiTableRef) => {
                     if (poiTableRef !== undefined &&
                         poiTableRef.name !== undefined &&
@@ -33063,10 +33452,7 @@ class PoiTableManager {
                         const poiTable = new PoiTable(poiTableRef.name, poiTableRef.useAltNamesForKey !== false);
                         if (poiTableRef.url !== undefined && typeof poiTableRef.url === "string") {
                             this.addTable(poiTable);
-                            const tableUrl = childUrlResolver === undefined
-                                ? poiTableRef.url
-                                : childUrlResolver(poiTableRef.url);
-                            loadPromises.push(poiTable.load(tableUrl));
+                            loadPromises.push(poiTable.load(poiTableRef.url));
                         }
                         else {
                             logger.error(`POI table definition has no valid url: ${poiTableRef}`);
@@ -33144,6 +33530,307 @@ exports.PoiTableManager = PoiTableManager;
 
 /***/ }),
 
+/***/ "../harp-mapview/lib/text/MapViewState.ts":
+/*!************************************************!*\
+  !*** ../harp-mapview/lib/text/MapViewState.ts ***!
+  \************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+/**
+ * View state obtained from a MapView instance.
+ */
+class MapViewState {
+    constructor(m_mapView, m_renderedTilesChangeCheck) {
+        this.m_mapView = m_mapView;
+        this.m_renderedTilesChangeCheck = m_renderedTilesChangeCheck;
+    }
+    get worldCenter() {
+        return this.m_mapView.worldCenter;
+    }
+    get cameraIsMoving() {
+        return this.m_mapView.cameraIsMoving;
+    }
+    get maxVisibilityDist() {
+        return this.m_mapView.viewRanges.maximum;
+    }
+    get zoomLevel() {
+        return this.m_mapView.zoomLevel;
+    }
+    get frameNumber() {
+        return this.m_mapView.frameNumber;
+    }
+    get lookAtDistance() {
+        return this.m_mapView.lookAtDistance;
+    }
+    get isDynamic() {
+        return this.m_mapView.isDynamicFrame;
+    }
+    get hiddenGeometryKinds() {
+        return this.m_mapView.tileGeometryManager === undefined
+            ? undefined
+            : this.m_mapView.tileGeometryManager.hiddenGeometryKinds;
+    }
+    get renderedTilesChanged() {
+        return this.m_renderedTilesChangeCheck();
+    }
+}
+exports.MapViewState = MapViewState;
+
+
+/***/ }),
+
+/***/ "../harp-mapview/lib/text/Placement.ts":
+/*!*********************************************!*\
+  !*** ../harp-mapview/lib/text/Placement.ts ***!
+  \*********************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const harp_geoutils_1 = __webpack_require__(/*! @here/harp-geoutils */ "../harp-geoutils/index.ts");
+const harp_text_canvas_1 = __webpack_require__(/*! @here/harp-text-canvas */ "../harp-text-canvas/index.ts");
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
+const THREE = __webpack_require__(/*! three */ "three");
+const TextElement_1 = __webpack_require__(/*! ./TextElement */ "../harp-mapview/lib/text/TextElement.ts");
+/**
+ * Functions related to text element placement.
+ */
+const tmpPosition = new THREE.Vector3(0, 0, 0);
+const tmpCameraDir = new THREE.Vector3(0, 0, 0);
+/**
+ * Checks whether the distance of the specified text element to the center of the given view is
+ * lower than a maximum threshold.
+ * @param textElement The textElement of which the view distance will be checked, with coordinates
+ * in world space.
+ * @param mapView The view that will be used as reference to calculate the distance.
+ * @param maxViewDistance The maximum distance value.
+ * @returns The text element view distance if it's lower than the maximum value, otherwise
+ * `undefined`.
+ */
+function checkViewDistance(worldCenter, textElement, projectionType, camera, maxViewDistance) {
+    const textDistance = computeViewDistance(worldCenter, textElement);
+    if (projectionType !== harp_geoutils_1.ProjectionType.Spherical) {
+        return textDistance <= maxViewDistance ? textDistance : undefined;
+    }
+    // Spherical projection
+    tmpPosition.copy(textElement.position).normalize();
+    camera.getWorldDirection(tmpCameraDir);
+    // TODO: Revisit, why is this angle check needed and where does the constant -0.6 come from?
+    return tmpPosition.dot(tmpCameraDir) < -0.6 && textDistance <= maxViewDistance
+        ? textDistance
+        : undefined;
+}
+/**
+ * Computes the distance of the specified text element to the given position.
+ * @param refPosition The world coordinates used a reference position to calculate the distance.
+ * @param textElement The textElement of which the view distance will be checked. It must have
+ * coordinates in world space.
+ * @returns The text element view distance.
+ * `undefined`.
+ */
+function computeViewDistance(refPosition, textElement) {
+    let viewDistance;
+    if (Array.isArray(textElement.points) && textElement.points.length > 1) {
+        const viewDistance0 = refPosition.distanceTo(textElement.points[0]);
+        const viewDistance1 = refPosition.distanceTo(textElement.points[textElement.points.length - 1]);
+        viewDistance = Math.min(viewDistance0, viewDistance1);
+    }
+    else {
+        viewDistance = refPosition.distanceTo(textElement.points);
+    }
+    return viewDistance;
+}
+exports.computeViewDistance = computeViewDistance;
+/**
+ * Computes the maximum view distance for text elements as a ratio of the given view's maximum far
+ * plane distance.
+ * @param viewState The view for which the maximum view distance will be calculated.
+ * @param farDistanceLimitRatio The ratio to apply to the maximum far plane distance.
+ * @returns Maximum view distance.
+ */
+function getMaxViewDistance(viewState, farDistanceLimitRatio) {
+    return viewState.maxVisibilityDist * farDistanceLimitRatio;
+}
+exports.getMaxViewDistance = getMaxViewDistance;
+/**
+ * State of fading.
+ */
+var PrePlacementResult;
+(function (PrePlacementResult) {
+    PrePlacementResult[PrePlacementResult["Ok"] = 0] = "Ok";
+    PrePlacementResult[PrePlacementResult["NotReady"] = 1] = "NotReady";
+    PrePlacementResult[PrePlacementResult["Invisible"] = 2] = "Invisible";
+    PrePlacementResult[PrePlacementResult["TooFar"] = 3] = "TooFar";
+    PrePlacementResult[PrePlacementResult["Duplicate"] = 4] = "Duplicate";
+    PrePlacementResult[PrePlacementResult["Count"] = 5] = "Count";
+})(PrePlacementResult = exports.PrePlacementResult || (exports.PrePlacementResult = {}));
+/**
+ * Applies early rejection tests for a given text element meant to avoid trying to place labels
+ * that are not visible, not ready, duplicates etc...
+ * @param textElement The Text element to check.
+ * @param viewState The view for which the text element will be placed.
+ * @param viewCamera The view's camera.
+ * @param m_poiManager To prepare pois for rendering.
+ * @param projectionType The projection type currently used from geo to world space.
+ * @param [maxViewDistance] If specified, text elements farther than this max distance will be
+ * rejected.
+ * @returns An object with the result code and the text element view distance
+ * ( or `undefined` of the checks failed) as second.
+ */
+function checkReadyForPlacement(textElement, viewState, viewCamera, poiManager, projectionType, maxViewDistance) {
+    let viewDistance;
+    if (!textElement.visible) {
+        return { result: PrePlacementResult.Invisible, viewDistance };
+    }
+    // If a PoiTable is specified in the technique, the table is required to be
+    // loaded before the POI can be rendered.
+    if (!poiManager.updatePoiFromPoiTable(textElement)) {
+        // PoiTable has not been loaded, but is required to determine
+        // visibility.
+        return { result: PrePlacementResult.NotReady, viewDistance };
+    }
+    // Text element visibility and zoom level ranges must be checked after calling
+    // updatePoiFromPoiTable, since that function may change those values.
+    if (!textElement.visible ||
+        !harp_utils_1.MathUtils.isClamped(viewState.zoomLevel, textElement.minZoomLevel, textElement.maxZoomLevel)) {
+        return { result: PrePlacementResult.Invisible, viewDistance };
+    }
+    viewDistance =
+        maxViewDistance === undefined
+            ? computeViewDistance(viewState.worldCenter, textElement)
+            : checkViewDistance(viewState.worldCenter, textElement, projectionType, viewCamera, maxViewDistance);
+    if (viewDistance === undefined) {
+        return { result: PrePlacementResult.TooFar, viewDistance };
+    }
+    return { result: PrePlacementResult.Ok, viewDistance };
+}
+exports.checkReadyForPlacement = checkReadyForPlacement;
+/**
+ * Computes the offset for a point text accordingly to text alignment (and icon, if any).
+ * @param textElement The text element of which the offset will computed. It must be a point
+ * label with [[layoutStyle]] and [[bounds]] already computed.
+ * @param offset The offset result.
+ */
+function computePointTextOffset(textElement, offset = new THREE.Vector2()) {
+    harp_utils_1.assert(textElement.isPointLabel);
+    harp_utils_1.assert(textElement.layoutStyle !== undefined);
+    harp_utils_1.assert(textElement.bounds !== undefined);
+    const hAlign = textElement.layoutStyle.horizontalAlignment;
+    const vAlign = textElement.layoutStyle.verticalAlignment;
+    switch (hAlign) {
+        case harp_text_canvas_1.HorizontalAlignment.Right:
+            offset.x = -textElement.xOffset;
+            break;
+        default:
+            offset.x = textElement.xOffset;
+            break;
+    }
+    switch (vAlign) {
+        case harp_text_canvas_1.VerticalAlignment.Below:
+            offset.y = -textElement.yOffset;
+            break;
+        case harp_text_canvas_1.VerticalAlignment.Above:
+            offset.y = textElement.yOffset - textElement.bounds.min.y;
+            break;
+        default:
+            offset.y = textElement.yOffset;
+            break;
+    }
+    if (textElement.poiInfo !== undefined && TextElement_1.poiIsRenderable(textElement.poiInfo)) {
+        harp_utils_1.assert(textElement.poiInfo.computedWidth !== undefined);
+        harp_utils_1.assert(textElement.poiInfo.computedHeight !== undefined);
+        offset.x += textElement.poiInfo.computedWidth * (0.5 + hAlign);
+        offset.y += textElement.poiInfo.computedHeight * (0.5 + vAlign);
+    }
+    return offset;
+}
+exports.computePointTextOffset = computePointTextOffset;
+
+
+/***/ }),
+
+/***/ "../harp-mapview/lib/text/PlacementStats.ts":
+/*!**************************************************!*\
+  !*** ../harp-mapview/lib/text/PlacementStats.ts ***!
+  \**************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", { value: true });
+class PlacementStats {
+    constructor(m_logger) {
+        this.m_logger = m_logger;
+        this.totalGroups = 0;
+        this.resortedGroups = 0;
+        this.total = 0;
+        this.uninitialized = 0;
+        this.tooFar = 0;
+        this.numNotVisible = 0;
+        this.numPathTooSmall = 0;
+        this.numCannotAdd = 0;
+        this.numRenderedPoiIcons = 0;
+        this.numRenderedPoiTexts = 0;
+        this.numPoiTextsInvisible = 0;
+        this.numRenderedTextElements = 0;
+    }
+    clear() {
+        this.totalGroups = 0;
+        this.resortedGroups = 0;
+        this.total = 0;
+        this.uninitialized = 0;
+        this.tooFar = 0;
+        this.numNotVisible = 0;
+        this.numPathTooSmall = 0;
+        this.numCannotAdd = 0;
+        this.numRenderedPoiIcons = 0;
+        this.numRenderedPoiTexts = 0;
+        this.numPoiTextsInvisible = 0;
+        this.numRenderedTextElements = 0;
+    }
+    log() {
+        const numNotRendered = this.uninitialized +
+            this.numPoiTextsInvisible +
+            this.tooFar +
+            this.numNotVisible +
+            this.numCannotAdd;
+        this.m_logger.debug("Total groups", this.totalGroups);
+        this.m_logger.debug("Resorted groups", this.resortedGroups);
+        this.m_logger.debug("Total labels", this.total);
+        this.m_logger.debug("Rendered labels", this.numRenderedTextElements);
+        this.m_logger.debug("Rejected labels", numNotRendered);
+        this.m_logger.debug("Unitialized labels", this.uninitialized);
+        this.m_logger.debug("Rendered poi icons", this.numRenderedPoiIcons);
+        this.m_logger.debug("Rendered poi texts", this.numRenderedPoiTexts);
+        this.m_logger.debug("Poi text invisible", this.numPoiTextsInvisible);
+        this.m_logger.debug("Too far", this.tooFar);
+        this.m_logger.debug("Not visible", this.numNotVisible);
+        this.m_logger.debug("Path too small", this.numPathTooSmall);
+        this.m_logger.debug("Rejected, max glyphs reached", this.numCannotAdd);
+    }
+}
+exports.PlacementStats = PlacementStats;
+
+
+/***/ }),
+
 /***/ "../harp-mapview/lib/text/RenderState.ts":
 /*!***********************************************!*\
   !*** ../harp-mapview/lib/text/RenderState.ts ***!
@@ -33159,6 +33846,8 @@ exports.PoiTableManager = PoiTableManager;
  * SPDX-License-Identifier: Apache-2.0
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
+const THREE = __webpack_require__(/*! three */ "three");
 /**
  * State of fading.
  */
@@ -33190,15 +33879,13 @@ class RenderState {
      * @param opacity Computed opacity depending on value.
      * @param lastFrameNumber Latest frame the elements was rendered, allows to detect some less
      *                        obvious states, like popping up after being hidden.
-     * @param fadingTime Time used to fade in or out.
      */
-    constructor(state = FadingState.Undefined, value = 0.0, startTime = 0, opacity = 1.0, lastFrameNumber = Number.MIN_SAFE_INTEGER, fadingTime = exports.DEFAULT_FADE_TIME) {
+    constructor(state = FadingState.Undefined, value = 0.0, startTime = 0, opacity = 1.0, lastFrameNumber = Number.MIN_SAFE_INTEGER) {
         this.state = state;
         this.value = value;
         this.startTime = startTime;
         this.opacity = opacity;
         this.lastFrameNumber = lastFrameNumber;
-        this.fadingTime = fadingTime;
     }
     /**
      * Reset existing `RenderState` to appear like a fresh state.
@@ -33253,6 +33940,133 @@ class RenderState {
             this.state === FadingState.FadedIn ||
             this.state === FadingState.FadingOut;
         return visible;
+    }
+    /**
+     * Updates the state to [[FadingState.FadingIn]].
+     *
+     * @param frameNumber Current frame number.
+     * @param time Current time.
+     * @param forceFadeIn If `true` state is changed to [[FadingState.FadingIn]] independently
+     * of the previous state. Otherwise, change is only applied if state is
+     * [[FadingState.Undefined]] or old (wasn't updated in previous frame).
+     * @returns `true` if element is fading.
+     */
+    checkStartFadeIn(frameNumber, time, forceFadeIn = false) {
+        // Fade-in after skipping rendering during movement
+        if (forceFadeIn ||
+            this.state === FadingState.Undefined ||
+            this.lastFrameNumber < frameNumber - 1) {
+            this.startFadeIn(frameNumber, time);
+        }
+        this.lastFrameNumber = frameNumber;
+        return this.isFading();
+    }
+    /**
+     * Updates the state to [[FadingState.FadingOut]].
+     *
+     * @param frameNumber Current frame number.
+     * @param time Current time.
+     * @param forceFadeOut If `true` state is changed to [[FadingState.FadingOut]] independently
+     * of the previous state. Otherwise, change is only applied if state is
+     * [[FadingState.Undefined]] or old (wasn't updated in previous frame).
+     * @returns `true` if element is fading.
+     */
+    checkStartFadeOut(frameNumber, time, forceFadeOut = true) {
+        // Fade-in after skipping rendering during movement
+        if (forceFadeOut ||
+            this.state === FadingState.Undefined ||
+            this.lastFrameNumber < frameNumber - 1) {
+            this.startFadeOut(frameNumber, time);
+        }
+        this.lastFrameNumber = frameNumber;
+        return this.isFading();
+    }
+    /**
+     * Updates the state to [[FadingState.FadingIn]].
+     * If previous state is [[FadingState.FadingIn]] or [[FadingState.FadedIn]] it remains
+     * unchanged.
+     *
+     * @param frameNumber Current frame number.
+     * @param time Current time.
+     */
+    startFadeIn(frameNumber, time) {
+        if (this.lastFrameNumber < frameNumber - 1) {
+            this.reset();
+        }
+        if (this.state === FadingState.FadingIn || this.state === FadingState.FadedIn) {
+            return;
+        }
+        if (this.state === FadingState.FadingOut) {
+            // The fadeout is not complete: compute the virtual fadingStartTime in the past, to get
+            // a correct end time:
+            this.value = 1.0 - this.value;
+            this.startTime = time - this.value * exports.DEFAULT_FADE_TIME;
+        }
+        else {
+            this.startTime = time;
+            this.value = 0.0;
+            this.opacity = 0;
+        }
+        this.state = FadingState.FadingIn;
+    }
+    /**
+     * Updates the state to [[FadingState.FadingOut]].
+     * If previous state is [[FadingState.FadingOut]] or [[FadingState.FadedOut]] it remains
+     * unchanged.
+     *
+     * @param frameNumber Current frame number.
+     * @param time Current time.
+     */
+    startFadeOut(frameNumber, time) {
+        if (this.lastFrameNumber < frameNumber - 1) {
+            this.reset();
+        }
+        if (this.state === FadingState.FadingOut || this.state === FadingState.FadedOut) {
+            return;
+        }
+        if (this.state === FadingState.FadingIn) {
+            // The fade-in is not complete: compute the virtual fadingStartTime in the past, to get
+            // a correct end time:
+            this.startTime = time - this.value * exports.DEFAULT_FADE_TIME;
+            this.value = 1.0 - this.value;
+        }
+        else {
+            this.startTime = time;
+            this.value = 0.0;
+            this.opacity = 1;
+        }
+        this.state = FadingState.FadingOut;
+    }
+    /**
+     * Updates opacity to current time, changing the state to [[FadingState.FadedOut]] or
+     * [[FadingState.FadedIn]] when the opacity becomes 0 or 1 respectively.
+     * It does nothing if [[isFading]] !== `true`.
+     *
+     * @param time Current time.
+     * @param disableFading `true` if fading is disabled, `false` otherwise.
+     */
+    updateFading(time, disableFading) {
+        if (this.state !== FadingState.FadingIn && this.state !== FadingState.FadingOut) {
+            return;
+        }
+        if (this.startTime === 0) {
+            this.startTime = time;
+        }
+        const fadingTime = time - this.startTime;
+        const startValue = this.state === FadingState.FadingIn ? 0 : 1;
+        const endValue = this.state === FadingState.FadingIn ? 1 : 0;
+        if (disableFading || fadingTime >= exports.DEFAULT_FADE_TIME) {
+            this.value = 1.0;
+            this.opacity = endValue;
+            this.state =
+                this.state === FadingState.FadingIn ? FadingState.FadedIn : FadingState.FadedOut;
+        }
+        else {
+            // TODO: HARP-7648. Do this once for all labels (calculate the last frame value
+            // increment).
+            this.value = fadingTime / exports.DEFAULT_FADE_TIME;
+            this.opacity = THREE.Math.clamp(harp_utils_1.MathUtils.smootherStep(startValue, endValue, this.value), 0, 1);
+        }
     }
 }
 exports.RenderState = RenderState;
@@ -33372,8 +34186,17 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const harp_datasource_protocol_1 = __webpack_require__(/*! @here/harp-datasource-protocol */ "../harp-datasource-protocol/index.ts");
 const harp_text_canvas_1 = __webpack_require__(/*! @here/harp-text-canvas */ "../harp-text-canvas/index.ts");
 const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
-const TextElementState_1 = __webpack_require__(/*! ./TextElementState */ "../harp-mapview/lib/text/TextElementState.ts");
+const THREE = __webpack_require__(/*! three */ "three");
 const TextElementType_1 = __webpack_require__(/*! ./TextElementType */ "../harp-mapview/lib/text/TextElementType.ts");
+/**
+ * Return 'true' if the POI has been successfully prepared for rendering.
+ *
+ * @param poiInfo PoiInfo containing information for rendering the POI icon.
+ */
+function poiIsRenderable(poiInfo) {
+    return poiInfo.poiRenderBatch !== undefined;
+}
+exports.poiIsRenderable = poiIsRenderable;
 /**
  * State of loading.
  */
@@ -33391,8 +34214,7 @@ class TextElement {
      * Creates a new `TextElement`.
      *
      * @param text The text to display.
-     * @param points The position in world coordinates or a list of points in world coordinates for
-     *              a curved text.
+     * @param points The position or a list of points for a curved text, both in local tile space.
      * @param renderParams `TextElement` text rendering parameters.
      * @param layoutParams `TextElement` text layout parameters.
      * @param priority The priority of the `TextElement. Elements with the highest priority get
@@ -33407,7 +34229,7 @@ class TextElement {
      * @param fadeFar Distance to the camera (0.0 = camera position, 1.0 = farPlane) at which the
      *              label becomes transparent. A value of <= 0.0 disables fading.
      */
-    constructor(text, points, renderParams, layoutParams, priority = 0, xOffset, yOffset, featureId, style, fadeNear, fadeFar) {
+    constructor(text, points, renderParams, layoutParams, priority = 0, xOffset = 0, yOffset = 0, featureId, style, fadeNear, fadeFar) {
         this.text = text;
         this.points = points;
         this.renderParams = renderParams;
@@ -33441,22 +34263,17 @@ class TextElement {
          * lower `renderOrder`.
          */
         this.renderOrder = 0;
-        /**
-         * @hidden
-         * Used during sorting.
-         */
-        this.sortPriority = 0;
         if (renderParams instanceof harp_text_canvas_1.TextRenderStyle) {
             this.renderStyle = renderParams;
         }
         if (layoutParams instanceof harp_text_canvas_1.TextLayoutStyle) {
             this.layoutStyle = layoutParams;
         }
-        this.m_renderState = new TextElementState_1.TextElementState();
+        this.isPointLabel = points instanceof THREE.Vector3;
     }
     /**
-     * The position of this text element in world coordinates or the first point of the path used to
-     * render a curved text.
+     * The text element position or the first point of the path used to render a curved text, both
+     * in local tile space.
      */
     get position() {
         if (this.points instanceof Array) {
@@ -33466,7 +34283,7 @@ class TextElement {
         return this.points;
     }
     /**
-     * The list of points in world coordinates used to render the text along a path or `undefined`.
+     * The list of points in local tile space used to render the text along a path or `undefined`.
      */
     get path() {
         if (this.points instanceof Array) {
@@ -33504,7 +34321,8 @@ class TextElement {
      */
     get isLineMarker() {
         return (this.points !== undefined &&
-            (this.m_poiInfo !== undefined && harp_datasource_protocol_1.isLineMarkerTechnique(this.m_poiInfo.technique)));
+            this.m_poiInfo !== undefined &&
+            harp_datasource_protocol_1.isLineMarkerTechnique(this.m_poiInfo.technique));
     }
     /**
      * Determine if the `TextElement` is a path label.
@@ -33532,23 +34350,6 @@ class TextElement {
             return TextElementType_1.TextElementType.LineMarker;
         }
         return TextElementType_1.TextElementType.PathLabel;
-    }
-    get renderState() {
-        return this.m_renderState;
-    }
-    /**
-     * Return the last distance that has been computed for sorting during placement. This may not be
-     * the actual distance if the camera is moving, as the distance is computed only during
-     * placement. If the property `alwaysOnTop` is true, the value returned is always `0`.
-     *
-     * @returns 0 or negative distance to camera.
-     */
-    get renderDistance() {
-        return this.alwaysOnTop === true
-            ? 0
-            : this.m_renderState.viewDistance !== undefined
-                ? -this.m_renderState.viewDistance
-                : 0;
     }
     /**
      * Contains additional information about icon to be rendered along with text.
@@ -33584,6 +34385,163 @@ exports.TextElement = TextElement;
 
 /***/ }),
 
+/***/ "../harp-mapview/lib/text/TextElementGroup.ts":
+/*!****************************************************!*\
+  !*** ../harp-mapview/lib/text/TextElementGroup.ts ***!
+  \****************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
+/**
+ * Group of [[TextElement]] sharing same priority.
+ */
+class TextElementGroup extends harp_utils_1.PriorityListGroup {
+}
+exports.TextElementGroup = TextElementGroup;
+
+
+/***/ }),
+
+/***/ "../harp-mapview/lib/text/TextElementGroupPriorityList.ts":
+/*!****************************************************************!*\
+  !*** ../harp-mapview/lib/text/TextElementGroupPriorityList.ts ***!
+  \****************************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
+/**
+ * List of [[TextElement]] groups sorted by priority.
+ */
+class TextElementGroupPriorityList extends harp_utils_1.GroupedPriorityList {
+}
+exports.TextElementGroupPriorityList = TextElementGroupPriorityList;
+
+
+/***/ }),
+
+/***/ "../harp-mapview/lib/text/TextElementGroupState.ts":
+/*!*********************************************************!*\
+  !*** ../harp-mapview/lib/text/TextElementGroupState.ts ***!
+  \*********************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
+const TextElementState_1 = __webpack_require__(/*! ./TextElementState */ "../harp-mapview/lib/text/TextElementState.ts");
+/**
+ * `TextElementGroupState` keeps the state of a text element group and each element in it while
+ * they're being rendered.
+ */
+class TextElementGroupState {
+    /**
+     * Creates the state for specified group.
+     * @param group The group of which the state will be created.
+     * @param filter Function used to do early rejection. @see [[TextElementFilter]].
+     */
+    constructor(group, filter) {
+        this.group = group;
+        this.m_visited = false;
+        harp_utils_1.assert(group.elements.length > 0);
+        const length = group.elements.length;
+        this.m_textElementStates = new Array(length);
+        this.m_visited = true;
+        // TODO: HARP-7648. Reduce number of allocations here:
+        // a) Avoid creating the state for labels that don't pass early placement checks and make
+        //    this checks more strict.
+        // b) Break label state objects into a set of arrays held at group level, one for each
+        //    primitive field in the label state.
+        for (let i = 0; i < length; ++i) {
+            const textElement = group.elements[i];
+            const state = new TextElementState_1.TextElementState(textElement);
+            const textDistance = filter(state);
+            state.update(this, textDistance);
+            this.m_textElementStates[i] = state;
+        }
+    }
+    /**
+     * Indicates whether the group has been submitted to the [[TextElementsRenderer]] in the current
+     * frame.
+     */
+    get visited() {
+        return this.m_visited;
+    }
+    set visited(visited) {
+        this.m_visited = visited;
+    }
+    /**
+     * @returns the priority of the text elements in the group.
+     */
+    get priority() {
+        return this.m_textElementStates[0].element.priority;
+    }
+    /**
+     * Updates the fading state of all text elements within the group to the specified time.
+     * @param time The time to which the fading state will be updated.
+     * @param disableFading `true` if fading is disabled, `false` otherwise.
+     * @returns True if any element visible after fading.
+     */
+    updateFading(time, disableFading) {
+        let groupVisible = false;
+        for (const elementState of this.m_textElementStates) {
+            if (elementState !== undefined) {
+                const elementVisible = elementState.updateFading(time, disableFading);
+                groupVisible = groupVisible || elementVisible;
+            }
+        }
+        return groupVisible;
+    }
+    /**
+     * Updates the states of elements within the group.
+     * @param filter Function used to do early rejection. @see [[TextElementFilter]].
+     */
+    updateElements(filter) {
+        for (const elementState of this.m_textElementStates) {
+            const textDistance = filter(elementState);
+            elementState.update(this, textDistance);
+        }
+    }
+    get size() {
+        return this.m_textElementStates.length;
+    }
+    /**
+     * Returns text element states.
+     * @returns Array of element states.
+     */
+    get textElementStates() {
+        return this.m_textElementStates;
+    }
+}
+exports.TextElementGroupState = TextElementGroupState;
+
+
+/***/ }),
+
 /***/ "../harp-mapview/lib/text/TextElementState.ts":
 /*!****************************************************!*\
   !*** ../harp-mapview/lib/text/TextElementState.ts ***!
@@ -33599,47 +34557,59 @@ exports.TextElement = TextElement;
  * SPDX-License-Identifier: Apache-2.0
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
 const RenderState_1 = __webpack_require__(/*! ./RenderState */ "../harp-mapview/lib/text/RenderState.ts");
 const TextElementType_1 = __webpack_require__(/*! ./TextElementType */ "../harp-mapview/lib/text/TextElementType.ts");
 /**
  * `TextElementState` keeps the current state of a text element while it's being rendered.
  */
 class TextElementState {
-    /**
-     * Initializes the state.
-     * @param textElementType The text element type.
-     * @param disableFading True if fading is disabled, false otherwise.
-     * @param textElementPointCount Number of points the text element has.
-     */
-    initialize(textElementType, disableFading, textElementPointCount = 1) {
-        const fadingTime = disableFading === true ? 0 : RenderState_1.DEFAULT_FADE_TIME;
-        if (textElementType === TextElementType_1.TextElementType.LineMarker) {
-            this.m_iconRenderStates = new Array();
-            for (let i = 0; i < textElementPointCount; ++i) {
-                const iconRenderStates = this.m_iconRenderStates;
-                const renderState = new RenderState_1.RenderState();
-                renderState.state = RenderState_1.FadingState.FadingIn;
-                renderState.fadingTime = fadingTime;
-                iconRenderStates.push(renderState);
-            }
-            return;
-        }
-        this.m_textRenderState = new RenderState_1.RenderState();
-        this.m_textRenderState.fadingTime = fadingTime;
-        if (textElementType === TextElementType_1.TextElementType.PoiLabel) {
-            this.m_iconRenderStates = new RenderState_1.RenderState();
-            this.m_iconRenderStates.fadingTime = fadingTime;
-        }
+    constructor(m_textElement) {
+        this.m_textElement = m_textElement;
     }
     get initialized() {
         return this.m_textRenderState !== undefined || this.m_iconRenderStates !== undefined;
     }
     /**
-     * Clears the state.
+     * @returns `true` if any component of the element is visible, `false` otherwise.
      */
-    clear() {
-        this.m_iconRenderStates = undefined;
-        this.m_textRenderState = undefined;
+    get visible() {
+        if (this.m_textRenderState !== undefined && this.m_textRenderState.isVisible()) {
+            return true;
+        }
+        const iconRenderState = this.iconRenderState;
+        if (iconRenderState !== undefined && iconRenderState.isVisible()) {
+            return true;
+        }
+        const iconRenderStates = this.iconRenderStates;
+        if (iconRenderStates === undefined) {
+            return false;
+        }
+        for (const state of iconRenderStates) {
+            if (state.isVisible()) {
+                return true;
+            }
+        }
+        return false;
+    }
+    /**
+     * Resets the element to an initialized state.
+     */
+    reset() {
+        if (this.m_textRenderState !== undefined) {
+            this.m_textRenderState.reset();
+        }
+        if (this.iconRenderState) {
+            this.m_iconRenderStates.reset();
+        }
+        else if (this.m_iconRenderStates !== undefined) {
+            for (const renderState of this.m_iconRenderStates) {
+                renderState.reset();
+            }
+        }
+    }
+    get element() {
+        return this.m_textElement;
     }
     /**
      * Returns the last computed distance of the text element to the camera.
@@ -33648,8 +34618,45 @@ class TextElementState {
     get viewDistance() {
         return this.m_viewDistance;
     }
-    set viewDistance(distance) {
-        this.m_viewDistance = distance;
+    /**
+     * Updates the text element state.
+     * @param groupState  The state of the group the element belongs to.
+     * @param viewDistance The new view distance to set. If `undefined`, element is considered to
+     * be out of view.
+     */
+    update(groupState, viewDistance) {
+        if (this.initialized) {
+            this.setViewDistance(viewDistance, groupState);
+        }
+        else if (viewDistance !== undefined) {
+            this.initialize(groupState, viewDistance);
+        }
+    }
+    /**
+     * Sets the distance of the element to the current view center.
+     * @param viewDistance The new view distance to set. If `undefined`, element is considered to
+     * be out of view.
+     * @param groupState The state of the group the element belongs to.
+     */
+    setViewDistance(viewDistance, groupState) {
+        if (viewDistance === this.m_viewDistance) {
+            return;
+        }
+        this.m_viewDistance = viewDistance;
+    }
+    /**
+     * Return the last distance that has been computed for sorting during placement. This may not be
+     * the actual distance if the camera is moving, as the distance is computed only during
+     * placement. If the property `alwaysOnTop` is true, the value returned is always `0`.
+     *
+     * @returns 0 or negative distance to camera.
+     */
+    get renderDistance() {
+        return this.m_textElement.alwaysOnTop === true
+            ? 0
+            : this.m_viewDistance !== undefined
+                ? -this.m_viewDistance
+                : 0;
     }
     /**
      * @returns The text render state.
@@ -33679,8 +34686,229 @@ class TextElementState {
             ? undefined
             : this.m_iconRenderStates;
     }
+    /**
+     * @returns True if any element visible after fading.
+     */
+    updateFading(time, disableFading) {
+        let visible = false;
+        if (this.m_textRenderState !== undefined) {
+            this.m_textRenderState.updateFading(time, disableFading);
+            visible = this.m_textRenderState.isVisible();
+        }
+        if (this.iconRenderState !== undefined) {
+            const iconRenderState = this.m_iconRenderStates;
+            iconRenderState.updateFading(time, disableFading);
+            visible = visible || iconRenderState.isVisible();
+        }
+        else if (this.iconRenderStates !== undefined) {
+            for (const renderState of this.m_iconRenderStates) {
+                renderState.updateFading(time, disableFading);
+                visible = visible || renderState.isVisible();
+            }
+        }
+        return visible;
+    }
+    /**
+     * @param groupState The state of the group to which this element belongs.
+     * @param viewDistance Current distance of the element to the view center.
+     */
+    initialize(groupState, viewDistance) {
+        harp_utils_1.assert(this.m_textRenderState === undefined);
+        harp_utils_1.assert(this.m_iconRenderStates === undefined);
+        this.setViewDistance(viewDistance, groupState);
+        if (this.m_textElement.type === TextElementType_1.TextElementType.LineMarker) {
+            this.m_iconRenderStates = new Array();
+            for (const _point of this.m_textElement.path) {
+                const iconRenderStates = this.m_iconRenderStates;
+                const renderState = new RenderState_1.RenderState();
+                renderState.state = RenderState_1.FadingState.FadingIn;
+                iconRenderStates.push(renderState);
+            }
+            return;
+        }
+        this.m_textRenderState = new RenderState_1.RenderState();
+        if (this.m_textElement.type === TextElementType_1.TextElementType.PoiLabel) {
+            this.m_iconRenderStates = new RenderState_1.RenderState();
+        }
+    }
 }
 exports.TextElementState = TextElementState;
+
+
+/***/ }),
+
+/***/ "../harp-mapview/lib/text/TextElementStateCache.ts":
+/*!*********************************************************!*\
+  !*** ../harp-mapview/lib/text/TextElementStateCache.ts ***!
+  \*********************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
+const TextElementGroupState_1 = __webpack_require__(/*! ./TextElementGroupState */ "../harp-mapview/lib/text/TextElementGroupState.ts");
+/**
+ * Label distance threshold squared in meters. Point labels with the same name that are closer in
+ * world space than this value are treated as the same label. Valid within a single datasource.
+ * Used to identify duplicate labels in overlapping tiles.
+ */
+const MAX_LABEL_DUPLICATE_DIST_SQ = 100;
+/**
+ * Caches the state of text element groups currently rendered as well as the text element states
+ * belonging to them, including their fading state and text deduplication information.
+ */
+class TextElementStateCache {
+    constructor() {
+        this.m_referenceMap = new Map();
+        // Cache for point labels which may have duplicates in same tile or in neighboring tiles.
+        this.m_textMap = new Map();
+    }
+    /**
+     * Gets the state corresponding to a given text element group or sets a newly created state if
+     * not found. It updates the states of the text elements belonging to the group using the
+     * specified parameters.
+     * @param textElementGroup The group of which the state will be obtained.
+     * @param textElementFilter Filter used to decide if a text element must be initialized,
+     * @see [[TextElementGroupState]] construction.
+     * @returns Tuple with the group state as first element and a boolean indicating whether the
+     * state was found in cache (`true`) or newly created (`false`) as second element.
+     */
+    getOrSet(textElementGroup, textElementFilter) {
+        let groupState = this.get(textElementGroup);
+        if (groupState !== undefined) {
+            harp_utils_1.assert(groupState.size === textElementGroup.elements.length);
+            groupState.updateElements(textElementFilter);
+            return [groupState, true];
+        }
+        groupState = new TextElementGroupState_1.TextElementGroupState(textElementGroup, textElementFilter);
+        this.set(textElementGroup, groupState);
+        return [groupState, false];
+    }
+    get size() {
+        return this.m_referenceMap.size;
+    }
+    /**
+     * @returns All text element group states in the cache by group priority.
+     */
+    get sortedGroupStates() {
+        if (this.m_sortedGroupStates === undefined) {
+            this.m_sortedGroupStates = Array.from(this.m_referenceMap.values());
+            this.m_sortedGroupStates.sort((a, b) => {
+                return b.group.priority - a.group.priority;
+            });
+        }
+        harp_utils_1.assert(this.m_referenceMap.size === this.m_sortedGroupStates.length);
+        return this.m_sortedGroupStates;
+    }
+    /**
+     * Updates state of all cached groups, discarding those that are not needed anymore.
+     * @param time The current time.
+     * @param clearVisited `True` to clear visited flag in group states.
+     * @param disableFading `True` if fading is currently disabled, `false` otherwise.
+     * @returns `True` if any textElementGroup was evicted from cache, false otherwise.
+     */
+    update(time, clearVisited, disableFading) {
+        let anyEviction = false;
+        for (const [key, groupState] of this.m_referenceMap.entries()) {
+            const visible = groupState.updateFading(time, disableFading);
+            const keep = visible || groupState.visited;
+            if (!keep) {
+                this.m_referenceMap.delete(key);
+                this.m_sortedGroupStates = undefined;
+                anyEviction = true;
+            }
+            else if (clearVisited) {
+                groupState.visited = false;
+            }
+        }
+        this.m_textMap.clear();
+        return anyEviction;
+    }
+    /**
+     * Clears the whole cache contents.
+     */
+    clear() {
+        this.m_referenceMap.clear();
+        this.m_sortedGroupStates = undefined;
+        this.m_textMap.clear();
+    }
+    /**
+     * Removes duplicates for a given text element.
+     *
+     * @returns True if it's the remaining element after deduplication, false if it's been marked
+     * as duplicate.
+     */
+    deduplicateElement(elementState) {
+        const element = elementState.element;
+        if (!element.isPointLabel) {
+            return true;
+        }
+        // Point labels may have duplicates (as can path labels), Identify them
+        // and keep the one we already display.
+        const cachedEntries = this.m_textMap.get(element.text);
+        if (cachedEntries === undefined) {
+            // No labels found with the same text.
+            this.m_textMap.set(element.text, [elementState]);
+            return true;
+        }
+        // Other labels found with the same text. Check if they're near enough to be considered
+        // duplicates.
+        const entryCount = cachedEntries.length;
+        const elementPosition = element.points;
+        let duplicateIndex = -1;
+        for (let i = 0; i < entryCount; ++i) {
+            const cachedElementPosition = cachedEntries[i].element.position;
+            if (elementPosition.distanceToSquared(cachedElementPosition) <
+                MAX_LABEL_DUPLICATE_DIST_SQ) {
+                duplicateIndex = i;
+                break;
+            }
+        }
+        if (duplicateIndex === -1) {
+            // No duplicate found.
+            cachedEntries.push(elementState);
+            return true;
+        }
+        // Duplicate found, check whether there's a label already visible and keep that one.
+        const cachedDuplicate = cachedEntries[duplicateIndex];
+        if (!cachedDuplicate.visible && elementState.visible) {
+            // New label is visible, substitute the cached label.
+            cachedEntries[duplicateIndex] = elementState;
+            return true;
+        }
+        return false;
+    }
+    /**
+     * Gets the state corresponding to a given text element group.
+     * @param textElementGroup The group of which the state will be obtained.
+     * @returns The group state if cached, otherwise `undefined`.
+     */
+    get(textElementGroup) {
+        const groupState = this.m_referenceMap.get(textElementGroup);
+        if (groupState !== undefined) {
+            groupState.visited = true;
+        }
+        return groupState;
+    }
+    /**
+     * Sets a specified state for a given text element group.
+     * @param textElementGroup  The group of which the state will be set.
+     * @param textElementGroupState The state to set for the group.
+     */
+    set(textElementGroup, textElementGroupState) {
+        harp_utils_1.assert(textElementGroup.elements.length > 0);
+        this.m_referenceMap.set(textElementGroup, textElementGroupState);
+        this.m_sortedGroupStates = undefined;
+    }
+}
+exports.TextElementStateCache = TextElementStateCache;
 
 
 /***/ }),
@@ -33723,52 +34951,32 @@ var TextElementType;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
-const harp_geoutils_1 = __webpack_require__(/*! @here/harp-geoutils */ "../harp-geoutils/index.ts");
 const harp_text_canvas_1 = __webpack_require__(/*! @here/harp-text-canvas */ "../harp-text-canvas/index.ts");
 const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
 const THREE = __webpack_require__(/*! three */ "three");
-const ColorCache_1 = __webpack_require__(/*! ../ColorCache */ "../harp-mapview/lib/ColorCache.ts");
 const DebugContext_1 = __webpack_require__(/*! ../DebugContext */ "../harp-mapview/lib/DebugContext.ts");
 const PickHandler_1 = __webpack_require__(/*! ../PickHandler */ "../harp-mapview/lib/PickHandler.ts");
 const PoiRenderer_1 = __webpack_require__(/*! ../poi/PoiRenderer */ "../harp-mapview/lib/poi/PoiRenderer.ts");
+const Placement_1 = __webpack_require__(/*! ./Placement */ "../harp-mapview/lib/text/Placement.ts");
+const PlacementStats_1 = __webpack_require__(/*! ./PlacementStats */ "../harp-mapview/lib/text/PlacementStats.ts");
 const RenderState_1 = __webpack_require__(/*! ./RenderState */ "../harp-mapview/lib/text/RenderState.ts");
 const SimplePath_1 = __webpack_require__(/*! ./SimplePath */ "../harp-mapview/lib/text/SimplePath.ts");
 const TextElement_1 = __webpack_require__(/*! ./TextElement */ "../harp-mapview/lib/text/TextElement.ts");
-const TextElementType_1 = __webpack_require__(/*! ./TextElementType */ "../harp-mapview/lib/text/TextElementType.ts");
+const TextElementsRendererOptions_1 = __webpack_require__(/*! ./TextElementsRendererOptions */ "../harp-mapview/lib/text/TextElementsRendererOptions.ts");
+const TextElementStateCache_1 = __webpack_require__(/*! ./TextElementStateCache */ "../harp-mapview/lib/text/TextElementStateCache.ts");
 const TextStyleCache_1 = __webpack_require__(/*! ./TextStyleCache */ "../harp-mapview/lib/text/TextStyleCache.ts");
-const DEFAULT_STYLE_NAME = "default";
-const DEFAULT_FONT_CATALOG_NAME = "default";
+const UpdateStats_1 = __webpack_require__(/*! ./UpdateStats */ "../harp-mapview/lib/text/UpdateStats.ts");
 const MAX_INITIALIZED_TEXT_ELEMENTS_PER_FRAME = Infinity;
-const MIN_GLYPH_COUNT = 1024;
-const MAX_GLYPH_COUNT = 32768;
-/**
- * Default number of labels/POIs rendered in the scene
- */
-const DEFAULT_MAX_NUM_RENDERED_TEXT_ELEMENTS = 500;
+var Pass;
+(function (Pass) {
+    Pass[Pass["PersistentLabels"] = 0] = "PersistentLabels";
+    Pass[Pass["NewLabels"] = 1] = "NewLabels";
+})(Pass || (Pass = {}));
 /**
  * Default distance scale. Will be applied if distanceScale is not defined in the technique.
  * Defines the scale that will be applied to labeled icons (icon and text) in the distance.
  */
 exports.DEFAULT_TEXT_DISTANCE_SCALE = 0.5;
-/**
- * Number of elements that are put into second queue. This second chance queue is used to render
- * TextElements that have not been on screen before. This is a quick source for elements that can
- * appear when the camera moves a bit, before new elements are placed.
- */
-const DEFAULT_MAX_NUM_SECOND_CHANCE_ELEMENTS = 300;
-/**
- * Maximum distance for text labels expressed as a ratio of distance to from the camera (0) to the
- * far plane (1.0). May be synchronized with fog value ?
- */
-const DEFAULT_MAX_DISTANCE_RATIO_FOR_LABELS = 0.99;
-/**
- * Minimum scaling factor that may be applied to labels when their are distant from focus point.
- */
-const DEFAULT_LABEL_DISTANCE_SCALE_MIN = 0.7;
-/**
- * Maximum scaling factor that may be applied to labels due to their distance from focus point.
- */
-const DEFAULT_LABEL_DISTANCE_SCALE_MAX = 1.5;
 /**
  * Maximum number of recommended labels. If more labels are encountered, the "overloaded" mode is
  * set, which modifies the behavior of label placement and rendering, trying to keep delivering an
@@ -33779,66 +34987,98 @@ const OVERLOAD_LABEL_LIMIT = 20000;
 /**
  * If "overloaded" is `true`:
  *
- * Default number of labels/POIs placed in the scene. They are rendered only if they fit. If the
+ * Default number of labels/POIs updated in a frame. They are rendered only if they fit. If the
  * camera is not moving, it is ignored. See [[TextElementsRenderer.isDynamicFrame]].
  */
-const OVERLOAD_PLACED_LABEL_LIMIT = 100;
+const OVERLOAD_UPDATED_LABEL_LIMIT = 100;
 /**
  * If "overloaded" is `true`:
  *
  * Maximum time in milliseconds available for placement. If value is <= 0, or if the camera is not
  * moving, it is ignored. See [[TextElementsRenderer.isDynamicFrame]].
  */
-const OVERLOAD_PLACEMENT_TIME_LIMIT = 5;
+const OVERLOAD_UPDATE_TIME_LIMIT = 5;
 /**
  * If "overloaded" is `true`:
  *
  * Maximum time in milliseconds available for rendering. If value is <= 0, or if the camera is not
  * moving, it is ignored. See [[TextElementsRenderer.isDynamicFrame]].
  */
-const OVERLOAD_RENDER_TIME_LIMIT = 10;
+const OVERLOAD_PLACE_TIME_LIMIT = 10;
 /**
  * Minimum number of pixels per character. Used during estimation if there is enough screen space
  * available to render a text.
  */
 const MIN_AVERAGE_CHAR_WIDTH = 5;
-/**
- * Label distance threshold. Point labels with the same name that are closer in world space than
- * this value are treated as the same label. Valid within a single datasource. Used to identify
- * duplicate labels in overlapping tiles.
- */
-const LABEL_DIFFERENT_THRESHOLD_SQUARED = 4;
+const logger = harp_utils_1.LoggerManager.instance.create("TextElementsRenderer", { level: harp_utils_1.LogLevel.Log });
 // Development flag: Enable debug print.
 const PRINT_LABEL_DEBUG_INFO = false;
-const logger = harp_utils_1.LoggerManager.instance.create("TextElementsRenderer");
+const updateStats = PRINT_LABEL_DEBUG_INFO ? new UpdateStats_1.UpdateStats(logger) : undefined;
+const placementStats = PRINT_LABEL_DEBUG_INFO ? new PlacementStats_1.PlacementStats(logger) : undefined;
 const tempBox = new THREE.Box2();
 const tempBoxes = [];
 const tempBox2D = new harp_utils_1.Math2D.Box();
 const tempPosition = new THREE.Vector3();
-const tempPoiPosition = new THREE.Vector3(0, 0, 0);
 const tempScreenPosition = new THREE.Vector2();
+const tempScreenPoints = [];
 const tempPoiScreenPosition = new THREE.Vector2();
+const tempTextOffset = new THREE.Vector2();
 class TileTextElements {
-    constructor(tile, textElements) {
+    constructor(tile, group) {
         this.tile = tile;
-        this.textElements = textElements;
+        this.group = group;
     }
 }
 class TextElementLists {
-    constructor(priority, textElementLists) {
-        this.priority = priority;
-        this.textElementLists = textElementLists;
+    constructor(lists) {
+        this.lists = lists;
+    }
+    get priority() {
+        harp_utils_1.assert(this.lists.length > 0);
+        // All text element lists here have the same priority.
+        return this.lists[0].group.priority;
     }
     /**
      * Sum up the number of elements in all lists.
      */
     count() {
         let n = 0;
-        for (const list of this.textElementLists) {
-            n += list.textElements.length;
+        for (const list of this.lists) {
+            n += list.group.elements.length;
         }
         return n;
     }
+}
+var InitState;
+(function (InitState) {
+    InitState[InitState["Uninitialized"] = 0] = "Uninitialized";
+    InitState[InitState["Initializing"] = 1] = "Initializing";
+    InitState[InitState["Initialized"] = 2] = "Initialized";
+})(InitState || (InitState = {}));
+function checkIfTextElementsChanged(dataSourceTileList) {
+    let textElementsChanged = false;
+    dataSourceTileList.forEach(({ renderedTiles }) => {
+        renderedTiles.forEach(tile => {
+            if (tile.textElementsChanged) {
+                tile.textElementsChanged = false;
+                textElementsChanged = true;
+            }
+        });
+    });
+    return textElementsChanged;
+}
+function isPlacementTimeExceeded(startTime) {
+    // startTime is set in overload mode.
+    if (startTime === undefined || OVERLOAD_PLACE_TIME_LIMIT <= 0) {
+        return false;
+    }
+    const endTime = harp_utils_1.PerformanceTimer.now();
+    const elapsedTime = endTime - startTime;
+    if (elapsedTime > OVERLOAD_PLACE_TIME_LIMIT) {
+        logger.debug("Placement time limit exceeded.");
+        return true;
+    }
+    return false;
 }
 /**
  * @hidden
@@ -33852,81 +35092,53 @@ class TextElementsRenderer {
      * [[TextElement]]s every frame.
      *
      * @param m_mapView MapView to render into
+     * @param m_viewState State of the view for which this renderer will draw text.
+     * @param m_viewCamera Camera used by the view for which this renderer will draw text.
+     * @param m_viewUpdateCallback To be called whenever the view needs to be updated.
+     * @param m_renderer The THREE.js `WebGLRenderer` used by the text renderer.
+     * @param m_poiManager To prepare pois for rendering.
      * @param m_screenCollisions General 2D screen occlusion management, may be shared between
      *     instances.
      * @param m_screenProjector Projects 3D coordinates into screen space.
-     * @param m_minNumGlyphs Minimum number of glyphs (per-layer). Controls the size of internal
-     * buffers.
-     * @param m_maxNumGlyphs Maximum number of glyphs (per-layer). Controls the size of internal
-     * buffers.
      * @param m_theme Theme defining  text styles.
-     * @param m_maxNumVisibleLabels Maximum number of visible [[TextElement]]s.
-     * @param m_numSecondChanceLabels Number of [[TextElement]] that will be rendered again.
-     * @param m_maxDistanceRatioForTextLabels Maximum distance for pure [[TextElement]], at which
-     *          it should still be rendered, expressed as a fraction of the distance between
-     *          the near and far plane [0, 1.0]. Defaults to
-     *          [[DEFAULT_MAX_DISTANCE_RATIO_FOR_LABELS]].
-     * @param m_maxDistanceRatioForPoiLabels Maximum distance for [[TextElement]] with icon,
-     *          expressed as a fraction of the distance between the near and far plane [0, 1.0].
-     *          Defaults to [[DEFAULT_MAX_DISTANCE_RATIO_FOR_LABELS]].
-     * @param m_labelDistanceScaleMin Minimum scale factor that may be applied to [[TextElement]]s
-     *          due to its disctance from focus point. Defaults to `0.7`.
-     * @param m_labelDistanceScaleMax Maximum scale factor that may be applied to [[TextElement]]s
-     *          due to its distance from focus point. Defaults to `1.5`.
+     * @param options Configuration options for the text renderer. See
+     * [[TextElementsRendererOptions]].
      */
-    constructor(m_mapView, m_screenCollisions, m_screenProjector, m_minNumGlyphs, m_maxNumGlyphs, m_theme, m_maxNumVisibleLabels, m_numSecondChanceLabels, m_labelDistanceScaleMin, m_labelDistanceScaleMax, m_maxDistanceRatioForTextLabels, m_maxDistanceRatioForPoiLabels) {
+    constructor(m_mapView, m_viewState, m_viewCamera, m_viewUpdateCallback, m_renderer, m_poiManager, m_screenCollisions, m_screenProjector, m_theme, options) {
         this.m_mapView = m_mapView;
+        this.m_viewState = m_viewState;
+        this.m_viewCamera = m_viewCamera;
+        this.m_viewUpdateCallback = m_viewUpdateCallback;
+        this.m_renderer = m_renderer;
+        this.m_poiManager = m_poiManager;
         this.m_screenCollisions = m_screenCollisions;
         this.m_screenProjector = m_screenProjector;
-        this.m_minNumGlyphs = m_minNumGlyphs;
-        this.m_maxNumGlyphs = m_maxNumGlyphs;
         this.m_theme = m_theme;
-        this.m_maxNumVisibleLabels = m_maxNumVisibleLabels;
-        this.m_numSecondChanceLabels = m_numSecondChanceLabels;
-        this.m_labelDistanceScaleMin = m_labelDistanceScaleMin;
-        this.m_labelDistanceScaleMax = m_labelDistanceScaleMax;
-        this.m_maxDistanceRatioForTextLabels = m_maxDistanceRatioForTextLabels;
-        this.m_maxDistanceRatioForPoiLabels = m_maxDistanceRatioForPoiLabels;
+        this.m_initState = InitState.Uninitialized;
         this.m_initializedTextElementCount = 0;
         this.m_textRenderers = [];
-        this.m_textStyles = new Map();
-        this.m_defaultStyle = {
-            name: DEFAULT_STYLE_NAME,
-            fontCatalog: DEFAULT_FONT_CATALOG_NAME,
-            renderParams: this.m_mapView.textRenderStyleCache.get(TextStyleCache_1.DEFAULT_TEXT_STYLE_CACHE_ID).params,
-            layoutParams: this.m_mapView.textLayoutStyleCache.get(TextStyleCache_1.DEFAULT_TEXT_STYLE_CACHE_ID).params
-        };
-        this.m_lastRenderedTextElements = [];
-        this.m_secondChanceTextElements = [];
         this.m_tmpVector = new THREE.Vector2();
         this.m_overloaded = false;
+        this.m_cacheInvalidated = false;
+        this.m_forceNewLabelsPass = false;
         this.m_catalogsLoading = 0;
-        if (this.m_minNumGlyphs === undefined) {
-            this.m_minNumGlyphs = MIN_GLYPH_COUNT;
-        }
-        if (this.m_maxNumGlyphs === undefined) {
-            this.m_maxNumGlyphs = MAX_GLYPH_COUNT;
-        }
-        if (this.m_maxNumVisibleLabels === undefined) {
-            this.m_maxNumVisibleLabels = DEFAULT_MAX_NUM_RENDERED_TEXT_ELEMENTS;
-        }
-        if (this.m_numSecondChanceLabels === undefined) {
-            this.m_numSecondChanceLabels = DEFAULT_MAX_NUM_SECOND_CHANCE_ELEMENTS;
-        }
-        if (this.m_labelDistanceScaleMin === undefined) {
-            this.m_labelDistanceScaleMin = DEFAULT_LABEL_DISTANCE_SCALE_MIN;
-        }
-        if (this.m_labelDistanceScaleMax === undefined) {
-            this.m_labelDistanceScaleMax = DEFAULT_LABEL_DISTANCE_SCALE_MAX;
-        }
-        if (this.m_maxDistanceRatioForTextLabels === undefined) {
-            this.m_maxDistanceRatioForTextLabels = DEFAULT_MAX_DISTANCE_RATIO_FOR_LABELS;
-        }
-        if (this.m_maxDistanceRatioForPoiLabels === undefined) {
-            this.m_maxDistanceRatioForPoiLabels = DEFAULT_MAX_DISTANCE_RATIO_FOR_LABELS;
-        }
-        this.initializeDefaultAssets();
-        this.initializeTextCanvases();
+        this.m_textElementStateCache = new TextElementStateCache_1.TextElementStateCache();
+        this.m_textStyleCache = new TextStyleCache_1.TextStyleCache(this.m_theme);
+        this.m_options = Object.assign({}, options);
+        TextElementsRendererOptions_1.initializeDefaultOptions(this.m_options);
+    }
+    /**
+     * Disable all fading animations (for debugging and performance measurement). Defaults to
+     * `false`.
+     */
+    set disableFading(disable) {
+        this.m_options.disableFading = disable;
+    }
+    get disableFading() {
+        return this.m_options.disableFading === true;
+    }
+    get styleCache() {
+        return this.m_textStyleCache;
     }
     /**
      * Render the text using the specified camera into the current canvas.
@@ -33934,6 +35146,9 @@ class TextElementsRenderer {
      * @param camera Orthographic camera to use.
      */
     renderText(camera) {
+        if (!this.initialized) {
+            return;
+        }
         const debugGlyphs = DebugContext_1.debugContext.getValue("DEBUG_GLYPHS");
         if (debugGlyphs !== undefined &&
             this.m_debugGlyphTextureCacheMesh !== undefined &&
@@ -33946,34 +35161,10 @@ class TextElementsRenderer {
         }
     }
     /**
-     * Reset internal state at the beginning of a frame.
+     * Forces update of text elements in the next call to [[placeText]].
      */
-    reset() {
-        this.m_screenCollisions.reset();
-        for (const textRenderer of this.m_textRenderers) {
-            textRenderer.textCanvas.clear();
-            textRenderer.poiRenderer.reset();
-        }
-        this.m_initializedTextElementCount = 0;
-    }
-    /**
-     * Update the geometries at the end of a frame before rendering them.
-     */
-    update() {
-        for (const textRenderer of this.m_textRenderers) {
-            textRenderer.poiRenderer.update();
-        }
-    }
-    /**
-     * Visit all visible tiles and place their text labels and POI icons. The placement of
-     * [[TextElement]]s is a time consuming process, and cannot be done every frame, but should only
-     * be done when the camera moved (a lot) of whenever the set of visible tiles change.
-     *
-     * The actually rendered [[TextElement]]s are stored internally until the next placement is done
-     * to speed up rendering when no camera movement was detected.
-     */
-    placeAllTileLabels() {
-        this.placeAllLabels();
+    invalidateCache() {
+        this.m_cacheInvalidated = true;
     }
     /**
      * Notify `TextElementsRenderer` that the camera has started a movement.
@@ -33985,13 +35176,7 @@ class TextElementsRenderer {
      * Notify `TextElementsRenderer` that the camera has finished its movement.
      */
     movementFinished() {
-        this.placeAllLabels();
-    }
-    /**
-     * Default [[TextElementStyle]] used to render [[TextElement]]s.
-     */
-    get defaultStyle() {
-        return this.m_defaultStyle;
+        this.invalidateCache();
     }
     /**
      * Is `true` if number of [[TextElement]]s in visible tiles is larger than the recommended
@@ -34001,63 +35186,69 @@ class TextElementsRenderer {
         return this.m_overloaded;
     }
     /**
-     * Render the user [[TextElement]]s.
-     *
-     * @param time Current time for animations.
-     * @param frameNumber Integer number incremented every frame.
+     * Places text elements for the current frame.
+     * @param dataSourceTileList List of tiles to be rendered for each data source.
+     * @param projection The view's projection.
+     * @param time Current frame time.
      */
-    renderUserTextElements(time, frameNumber) {
-        const renderList = this.m_mapView.visibleTileSet.dataSourceTileList;
-        const zoomLevel = this.m_mapView.zoomLevel;
-        // Render the user POIs first
-        renderList.forEach(renderListEntry => {
-            for (const tile of renderListEntry.visibleTiles) {
-                for (const textElement of tile.userTextElements) {
-                    // update distance
-                    textElement.tileCenter = tile.center;
-                    this.updateViewDistance(this.m_mapView.worldCenter, textElement);
-                }
-                this.renderTextElements(tile.userTextElements, time, frameNumber, zoomLevel);
-            }
-        });
-    }
-    /**
-     * Re-render the previously placed [[TextElement]]s.
-     *
-     * @param time Current time for animations.
-     * @param frameNumber Integer number incremented every frame.
-     */
-    renderAllTileText(time, frameNumber) {
-        const renderList = this.m_mapView.visibleTileSet.dataSourceTileList;
-        const zoomLevel = this.m_mapView.zoomLevel;
-        this.checkIfOverloaded();
-        if (this.m_lastRenderedTextElements.length === 0) {
-            const renderStartTime = this.overloaded && this.m_mapView.isDynamicFrame
-                ? harp_utils_1.PerformanceTimer.now()
-                : undefined;
-            // Nothing has been rendered before, process the list of placed labels in all tiles.
-            renderList.forEach(renderListEntry => {
-                this.renderTileList(renderListEntry.renderedTiles, time, frameNumber, zoomLevel, renderStartTime, this.m_lastRenderedTextElements, this.m_secondChanceTextElements);
-            });
-        }
-        else {
-            //TODO: Avoid list allocation
-            const allRenderableTextElements = this.m_lastRenderedTextElements.concat(this.m_secondChanceTextElements);
-            this.renderTextElements(allRenderableTextElements, time, frameNumber, zoomLevel);
-        }
-    }
-    /**
-     * Render the [[TextElement]]s that are not part of the scene, but the overlay. Useful if a UI
-     * with text or just plain information in the canvas itself should be presented to the user,
-     * instead of using an HTML layer.
-     *
-     * @param textElements List of [[TextElement]]s in the overlay.
-     */
-    renderOverlay(textElements) {
-        if (textElements === undefined || textElements.length === 0) {
+    placeText(dataSourceTileList, projection, time) {
+        const tileTextElementsChanged = checkIfTextElementsChanged(dataSourceTileList);
+        const textElementsAvailable = this.hasOverlayText() || tileTextElementsChanged;
+        if (!this.initialize(textElementsAvailable)) {
             return;
         }
-        this.renderOverlayTextElements(textElements);
+        const updateTextElements = this.m_cacheInvalidated ||
+            tileTextElementsChanged ||
+            this.m_viewState.renderedTilesChanged;
+        logger.debug(`FRAME: ${this.m_viewState.frameNumber}, ZOOM LEVEL: ${this.m_viewState.zoomLevel}`);
+        const clearVisitedGroups = updateTextElements;
+        const anyTextGroupEvicted = this.m_textElementStateCache.update(time, clearVisitedGroups, this.m_options.disableFading);
+        if (updateTextElements) {
+            this.updateTextElements(dataSourceTileList, projection);
+        }
+        this.reset();
+        this.prepopulateScreenWithBlockingElements(dataSourceTileList);
+        // New text elements must be placed either if text elements were updated in this frame
+        // or if any text element group was evicted. The second case happens when the group is not
+        // visited anymore and all it's elements just became invisible, which means there's newly
+        // available screen space where new text elements could be placed. A common scenario where
+        // this happens is zooming in/out: text groups from the old level may still be fading out
+        // after all groups in the new level were updated.
+        const placeNewTextElements = updateTextElements || anyTextGroupEvicted;
+        this.placeTextElements(time, placeNewTextElements);
+        this.placeOverlayTextElements();
+        this.updateTextRenderers();
+    }
+    /**
+     * Adds new overlay text elements to this `MapView`.
+     *
+     * @param textElements Array of [[TextElement]] to be added.
+     */
+    addOverlayText(textElements) {
+        if (textElements.length === 0) {
+            return;
+        }
+        this.m_overlayTextElements =
+            this.m_overlayTextElements === undefined
+                ? textElements.slice()
+                : this.m_overlayTextElements.concat(textElements);
+    }
+    /**
+     * Adds new overlay text elements to this `MapView`.
+     *
+     * @param textElements Array of [[TextElement]] to be added.
+     */
+    clearOverlayText() {
+        this.m_overlayTextElements = [];
+    }
+    /**
+     * @returns Whether there's overlay text to be rendered.
+     */
+    hasOverlayText() {
+        return this.m_overlayTextElements !== undefined && this.m_overlayTextElements.length > 0;
+    }
+    get overlayText() {
+        return this.m_overlayTextElements;
     }
     /**
      * Fill the picking results for the pixel with the given screen coordinate. If multiple
@@ -34108,28 +35299,6 @@ class TextElementsRenderer {
         }
     }
     /**
-     * Retrieves a [[TextElementStyle]] for [[Theme]]'s [[TextStyle]] id.
-     */
-    getTextElementStyle(styleId) {
-        let result;
-        if (styleId === undefined) {
-            result = this.m_defaultStyle;
-        }
-        else {
-            result = this.m_textStyles.get(styleId);
-            if (result === undefined) {
-                result = this.m_defaultStyle;
-            }
-        }
-        return result;
-    }
-    /**
-     * `true` if font catalogs are ready, that means all font catalogs are initialized.
-     */
-    get ready() {
-        return this.m_catalogsLoading === 0 && this.m_textRenderers.length > 0;
-    }
-    /**
      * `true` if any resource used by any `FontCatalog` is still loading.
      */
     get loading() {
@@ -34144,18 +35313,7 @@ class TextElementsRenderer {
      * after that as if they have just been added.
      */
     clearRenderStates() {
-        const renderList = this.m_mapView.visibleTileSet.dataSourceTileList;
-        renderList.forEach(renderListEntry => {
-            for (const tile of renderListEntry.visibleTiles) {
-                // Reset the render states, handle them as if they were just added to the tile.
-                tile.userTextElements.forEach(textElement => {
-                    textElement.renderState.clear();
-                });
-                tile.textElementGroups.forEach(textElement => {
-                    textElement.renderState.clear();
-                });
-            }
-        });
+        this.m_textElementStateCache.clear();
     }
     /**
      * Return memory used by all objects managed by `TextElementsRenderer`.
@@ -34173,17 +35331,58 @@ class TextElementsRenderer {
         }
         return memoryUsage;
     }
+    get initialized() {
+        return this.m_initState === InitState.Initialized;
+    }
+    get initializing() {
+        return this.m_initState === InitState.Initializing;
+    }
+    /**
+     * Initializes the text renderer once there's any text element available for rendering.
+     * @param textElementsAvailable Indicates whether there's any text element to be rendered.
+     * @returns Whether the text renderer is initialized.
+     */
+    initialize(textElementsAvailable) {
+        if (this.m_initState === InitState.Uninitialized && textElementsAvailable) {
+            this.m_initState = InitState.Initializing;
+            this.invalidateCache(); // Force cache update after initialization.
+            this.initializeDefaultAssets();
+            this.initializeTextCanvases().then(() => {
+                this.m_initState = InitState.Initialized;
+            });
+        }
+        return this.m_initState === InitState.Initialized;
+    }
+    /**
+     * Reset internal state at the beginning of a frame.
+     */
+    reset() {
+        this.m_screenCollisions.reset();
+        for (const textRenderer of this.m_textRenderers) {
+            textRenderer.textCanvas.clear();
+            textRenderer.poiRenderer.reset();
+        }
+        this.m_initializedTextElementCount = 0;
+    }
+    /**
+     * Update state at the end of a frame.
+     */
+    updateTextRenderers() {
+        for (const textRenderer of this.m_textRenderers) {
+            textRenderer.poiRenderer.update();
+        }
+    }
     /**
      * Fills the screen with lines projected from world space, see [[Tile.blockingElements]].
      * @note These boxes have highest priority, so will block all other labels.
+     * @param dataSourceTileList List of tiles to be rendered for each data source.
      */
-    prepopulateScreenWithBlockingElements() {
-        const renderList = this.m_mapView.visibleTileSet.dataSourceTileList;
+    prepopulateScreenWithBlockingElements(dataSourceTileList) {
         const boxes = [];
-        renderList.forEach(renderListEntry => {
+        dataSourceTileList.forEach(renderListEntry => {
             const startLinePointProj = new THREE.Vector3();
             const endLinePointProj = new THREE.Vector3();
-            for (const tile of renderListEntry.visibleTiles) {
+            for (const tile of renderListEntry.renderedTiles.values()) {
                 for (const pathBlockingElement of tile.blockingElements) {
                     if (pathBlockingElement.points.length < 2) {
                         continue;
@@ -34210,30 +35409,15 @@ class TextElementsRenderer {
         });
         this.m_screenCollisions.allocateIBoxes(boxes);
     }
-    renderTextElements(textElements, time, frameNumber, zoomLevel, renderedTextElements, secondChanceTextElements) {
+    /**
+     * @returns True if whole group was processed for placement,
+     * false otherwise (e.g. placement limit reached).
+     */
+    placeTextElementGroup(groupState, renderParams, maxNumPlacedLabels, pass) {
         if (this.m_textRenderers.length === 0) {
-            return 0;
+            logger.warn("No text renderers initialized.");
+            return false;
         }
-        const currentlyRenderingPlacedElements = renderedTextElements === undefined;
-        const printInfo = textElements.length > 5000;
-        const mapViewState = {
-            cameraIsMoving: this.m_mapView.cameraIsMoving,
-            maxVisibilityDist: this.m_mapView.viewRanges.maximum,
-            zoomLevel,
-            frameNumber,
-            time
-        };
-        const stats = {
-            numNotVisible: 0,
-            numPathTooSmall: 0,
-            numCannotAdd: 0,
-            numRenderedPoiIcons: 0,
-            numRenderedPoiTexts: 0,
-            numPoiTextsInvisible: 0,
-            numRenderedTextElements: 0,
-            fadeAnimationRunning: false
-        };
-        const maxNumRenderedLabels = this.m_maxNumVisibleLabels;
         const shieldGroups = [];
         const temp = {
             additionParams: {},
@@ -34241,22 +35425,46 @@ class TextElementsRenderer {
             measurementParams: {},
             bufferAdditionParams: {}
         };
-        const tileGeometryManager = this.m_mapView.tileGeometryManager;
-        const hiddenKinds = tileGeometryManager !== undefined ? tileGeometryManager.hiddenGeometryKinds : undefined;
-        // Place text elements one by one.
-        for (const textElement of textElements) {
-            if (!currentlyRenderingPlacedElements &&
-                maxNumRenderedLabels >= 0 &&
-                stats.numRenderedTextElements >= maxNumRenderedLabels) {
-                break;
+        const hiddenKinds = this.m_viewState.hiddenGeometryKinds;
+        for (const textElementState of groupState.textElementStates) {
+            if (pass === Pass.PersistentLabels) {
+                if (placementStats) {
+                    ++placementStats.total;
+                }
             }
+            if (maxNumPlacedLabels >= 0 &&
+                renderParams.numRenderedTextElements >= maxNumPlacedLabels) {
+                logger.debug("Placement label limit exceeded.");
+                return false;
+            }
+            // Skip all labels that are not initialized (didn't pass early placement tests)
+            // or don't belong to this pass.
+            if (!textElementState.initialized) {
+                if (placementStats) {
+                    ++placementStats.uninitialized;
+                }
+                continue;
+            }
+            if (textElementState.viewDistance === undefined) {
+                if (placementStats) {
+                    ++placementStats.tooFar;
+                }
+                continue;
+            }
+            if ((pass === Pass.PersistentLabels && !textElementState.visible) ||
+                (pass === Pass.NewLabels && textElementState.visible)) {
+                continue;
+            }
+            const textElement = textElementState.element;
             // Get the TextElementStyle.
-            const textElementStyle = this.getTextElementStyle(textElement.style);
+            const textElementStyle = this.m_textStyleCache.getTextElementStyle(textElement.style);
             const textCanvas = textElementStyle.textCanvas;
             const poiRenderer = textElementStyle.poiRenderer;
             if (textCanvas === undefined || poiRenderer === undefined) {
+                logger.warn("Text canvas or poi renderer not ready.");
                 continue;
             }
+            // TODO: HARP-7648. Discard hidden kinds sooner, before placement.
             // Check if the label should be hidden.
             if (hiddenKinds !== undefined &&
                 textElement.kind !== undefined &&
@@ -34264,18 +35472,22 @@ class TextElementsRenderer {
                 continue;
             }
             const isPathLabel = textElement.isPathLabel;
-            let screenPoints;
             // For paths, check if the label may fit.
             if (isPathLabel) {
-                const screenPointsResult = this.checkForSmallLabels(textElement);
-                if (screenPointsResult === undefined) {
-                    stats.numNotVisible++;
-                    if (textElement.dbgPathTooSmall === true) {
-                        stats.numPathTooSmall++;
+                // TODO: HARP-7648. checkForSmallLabels takes a large part of text placement time.
+                // Try to make it faster or execute cheaper rejection tests before.
+                if (!this.checkForSmallLabels(textElement, tempScreenPoints)) {
+                    if (placementStats) {
+                        placementStats.numNotVisible++;
                     }
+                    if (textElement.dbgPathTooSmall === true) {
+                        if (placementStats) {
+                            placementStats.numPathTooSmall++;
+                        }
+                    }
+                    textElementState.reset();
                     continue;
                 }
-                screenPoints = screenPointsResult;
             }
             // Trigger the glyph load if needed.
             if (textElement.loadingState === undefined) {
@@ -34294,7 +35506,10 @@ class TextElementsRenderer {
                         .loadCharset(textElement.text, textElement.renderStyle)
                         .then(() => {
                         textElement.loadingState = TextElement_1.LoadingState.Loaded;
-                        this.m_mapView.update();
+                        // Ensure that text elements that were loading glyphs get a chance
+                        // to be rendered if there's no text element updates in the next frames.
+                        this.m_forceNewLabelsPass = true;
+                        this.m_viewUpdateCallback();
                     });
                 }
             }
@@ -34320,40 +35535,30 @@ class TextElementsRenderer {
             // Move onto the next TextElement if we cannot continue adding glyphs to this layer.
             if (layer !== undefined) {
                 if (layer.storage.drawCount + textElement.glyphs.length > layer.storage.capacity) {
-                    ++stats.numCannotAdd;
+                    if (placementStats) {
+                        ++placementStats.numCannotAdd;
+                    }
+                    logger.warn("layer glyph storage capacity exceeded.");
                     continue;
                 }
             }
             // Set the current style for the canvas.
             textCanvas.textRenderStyle = textElement.renderStyle;
             textCanvas.textLayoutStyle = textElement.layoutStyle;
-            // Render a POI...
+            // Place a POI...
             if (textElement.isPoiLabel) {
-                this.addPoiLabel(textElement, poiRenderer, textCanvas, stats, mapViewState, temp, renderedTextElements, secondChanceTextElements);
+                this.addPoiLabel(textElementState, groupState, poiRenderer, textCanvas, renderParams, temp);
             }
             // ... a line marker...
             else if (textElement.isLineMarker) {
-                this.addLineMarkerLabel(textElement, poiRenderer, shieldGroups, textCanvas, stats, mapViewState, temp, renderedTextElements, secondChanceTextElements);
+                this.addLineMarkerLabel(textElementState, groupState, poiRenderer, shieldGroups, textCanvas, renderParams, temp);
             }
             // ... or a path label.
             else if (isPathLabel) {
-                this.addPathLabel(textElement, screenPoints, poiRenderer, textCanvas, stats, mapViewState, temp, renderedTextElements, secondChanceTextElements);
+                this.addPathLabel(textElementState, groupState, tempScreenPoints, textCanvas, renderParams, temp);
             }
         }
-        if (PRINT_LABEL_DEBUG_INFO && printInfo) {
-            logger.log("textElements.length", textElements.length);
-            logger.log("numRenderedTextElements", stats.numRenderedTextElements);
-            logger.log("numRenderedPoiIcons", stats.numRenderedPoiIcons);
-            logger.log("numRenderedPoiTexts", stats.numRenderedPoiTexts);
-            logger.log("numPoiTextsInvisible", stats.numPoiTextsInvisible);
-            logger.log("numNotVisible", stats.numNotVisible);
-            logger.log("numPathTooSmall", stats.numPathTooSmall);
-            logger.log("numCannotAdd", stats.numCannotAdd);
-        }
-        if (!this.m_mapView.disableFading && stats.fadeAnimationRunning) {
-            this.m_mapView.update();
-        }
-        return stats.numRenderedTextElements;
+        return true;
     }
     initializeDefaultAssets() {
         // Initialize default font catalog.
@@ -34361,8 +35566,8 @@ class TextElementsRenderer {
             (Array.isArray(this.m_theme.fontCatalogs) && this.m_theme.fontCatalogs.length === 0)) {
             this.m_theme.fontCatalogs = [
                 {
-                    name: DEFAULT_FONT_CATALOG_NAME,
-                    url: this.m_mapView.defaultFontCatalog
+                    name: TextStyleCache_1.DEFAULT_FONT_CATALOG_NAME,
+                    url: this.m_options.fontCatalog
                 }
             ];
         }
@@ -34376,95 +35581,23 @@ class TextElementsRenderer {
                 }
             }
             if (defaultFontCatalogName === undefined) {
-                defaultFontCatalogName = DEFAULT_FONT_CATALOG_NAME;
+                defaultFontCatalogName = TextStyleCache_1.DEFAULT_FONT_CATALOG_NAME;
                 fontCatalogs[0].name = defaultFontCatalogName;
             }
         }
-        // Initialize default text style.
-        if (this.m_theme.textStyles === undefined) {
-            this.m_theme.textStyles = [];
-        }
-        const styles = this.m_theme.textStyles;
-        const themedDefaultStyle = styles.find(style => style.name === DEFAULT_STYLE_NAME);
-        if (themedDefaultStyle !== undefined) {
-            this.m_defaultStyle = this.createTextElementStyle(themedDefaultStyle, DEFAULT_STYLE_NAME);
-        }
-        else if (this.m_theme.defaultTextStyle !== undefined) {
-            this.m_defaultStyle = this.createTextElementStyle(this.m_theme.defaultTextStyle, DEFAULT_STYLE_NAME);
-        }
-        else if (styles.length > 0) {
-            this.m_defaultStyle = this.createTextElementStyle(styles[0], DEFAULT_STYLE_NAME);
-        }
-        this.m_defaultStyle.fontCatalog = defaultFontCatalogName;
+        this.m_textStyleCache.initializeDefaultTextElementStyle(defaultFontCatalogName);
     }
-    createTextElementStyle(style, styleName) {
-        return {
-            name: styleName,
-            fontCatalog: harp_utils_1.getOptionValue(style.fontCatalogName, DEFAULT_FONT_CATALOG_NAME),
-            renderParams: {
-                fontName: style.fontName,
-                fontSize: {
-                    unit: harp_text_canvas_1.FontUnit.Pixel,
-                    size: 32,
-                    backgroundSize: style.backgroundSize || 8
-                },
-                fontStyle: style.fontStyle === "Regular" ||
-                    style.fontStyle === "Bold" ||
-                    style.fontStyle === "Italic" ||
-                    style.fontStyle === "BoldItalic"
-                    ? harp_text_canvas_1.FontStyle[style.fontStyle]
-                    : undefined,
-                fontVariant: style.fontVariant === "Regular" ||
-                    style.fontVariant === "AllCaps" ||
-                    style.fontVariant === "SmallCaps"
-                    ? harp_text_canvas_1.FontVariant[style.fontVariant]
-                    : undefined,
-                rotation: style.rotation,
-                color: style.color !== undefined
-                    ? ColorCache_1.ColorCache.instance.getColor(style.color)
-                    : undefined,
-                backgroundColor: style.backgroundColor !== undefined
-                    ? ColorCache_1.ColorCache.instance.getColor(style.backgroundColor)
-                    : undefined,
-                opacity: style.opacity,
-                backgroundOpacity: style.backgroundOpacity
-            },
-            layoutParams: {
-                tracking: style.tracking,
-                leading: style.leading,
-                maxLines: style.maxLines,
-                lineWidth: style.lineWidth,
-                canvasRotation: style.canvasRotation,
-                lineRotation: style.lineRotation,
-                wrappingMode: style.wrappingMode === "None" ||
-                    style.wrappingMode === "Character" ||
-                    style.wrappingMode === "Word"
-                    ? harp_text_canvas_1.WrappingMode[style.wrappingMode]
-                    : harp_text_canvas_1.WrappingMode.Word,
-                verticalAlignment: style.vAlignment === "Above" ||
-                    style.vAlignment === "Center" ||
-                    style.vAlignment === "Below"
-                    ? harp_text_canvas_1.VerticalAlignment[style.vAlignment]
-                    : harp_text_canvas_1.VerticalAlignment.Center,
-                horizontalAlignment: style.hAlignment === "Left" ||
-                    style.hAlignment === "Center" ||
-                    style.hAlignment === "Right"
-                    ? harp_text_canvas_1.HorizontalAlignment[style.hAlignment]
-                    : harp_text_canvas_1.HorizontalAlignment.Center
-            }
-        };
-    }
-    initializeTextCanvases() {
+    async initializeTextCanvases() {
         const promises = [];
         this.m_theme.fontCatalogs.forEach(fontCatalogConfig => {
             this.m_catalogsLoading += 1;
             const fontCatalogPromise = harp_text_canvas_1.FontCatalog.load(fontCatalogConfig.url, 1024)
                 .then((loadedFontCatalog) => {
                 const loadedTextCanvas = new harp_text_canvas_1.TextCanvas({
-                    renderer: this.m_mapView.renderer,
+                    renderer: this.m_renderer,
                     fontCatalog: loadedFontCatalog,
-                    minGlyphCount: this.m_minNumGlyphs,
-                    maxGlyphCount: this.m_maxNumGlyphs
+                    minGlyphCount: this.m_options.minNumGlyphs,
+                    maxGlyphCount: this.m_options.maxNumGlyphs
                 });
                 this.m_textRenderers.push({
                     fontCatalog: fontCatalogConfig.name,
@@ -34480,8 +35613,16 @@ class TextElementsRenderer {
             });
             promises.push(fontCatalogPromise);
         });
-        Promise.all(promises).then(() => {
-            this.initializeTextElementStyles();
+        return Promise.all(promises).then(() => {
+            // Find the default TextCanvas and PoiRenderer.
+            let defaultTextCanvas;
+            this.m_textRenderers.forEach(textRenderer => {
+                if (defaultTextCanvas === undefined) {
+                    defaultTextCanvas = textRenderer.textCanvas;
+                }
+            });
+            const defaultPoiRenderer = new PoiRenderer_1.PoiRenderer(this.m_mapView, defaultTextCanvas);
+            this.m_textStyleCache.initializeTextElementStyles(defaultPoiRenderer, defaultTextCanvas, this.m_textRenderers);
             const defaultFontCatalog = this.m_textRenderers[0].textCanvas.fontCatalog;
             // Initialize glyph-debugging mesh.
             const planeGeometry = new THREE.PlaneGeometry(defaultFontCatalog.textureSize.width / 2.5, defaultFontCatalog.textureSize.height / 2.5, defaultFontCatalog.textureSize.width / defaultFontCatalog.maxWidth, defaultFontCatalog.textureSize.height / defaultFontCatalog.maxHeight);
@@ -34509,236 +35650,129 @@ class TextElementsRenderer {
             this.m_textRenderers[0].textCanvas
                 .getLayer(harp_text_canvas_1.DEFAULT_TEXT_CANVAS_LAYER)
                 .storage.scene.add(this.m_debugGlyphTextureCacheMesh, this.m_debugGlyphTextureCacheWireMesh);
-            this.m_mapView.update();
+            this.m_viewUpdateCallback();
         });
     }
-    initializeTextElementStyles() {
-        // Find the default TextCanvas and PoiRenderer.
-        let defaultTextCanvas;
-        this.m_textRenderers.forEach(textRenderer => {
-            if (defaultTextCanvas === undefined) {
-                defaultTextCanvas = textRenderer.textCanvas;
-            }
-        });
-        const defaultPoiRenderer = new PoiRenderer_1.PoiRenderer(this.m_mapView, defaultTextCanvas);
-        // Initialize default text style.
-        if (this.m_defaultStyle.fontCatalog !== undefined) {
-            const styledTextRenderer = this.m_textRenderers.find(textRenderer => textRenderer.fontCatalog === this.m_defaultStyle.fontCatalog);
-            this.m_defaultStyle.textCanvas =
-                styledTextRenderer !== undefined ? styledTextRenderer.textCanvas : undefined;
-            this.m_defaultStyle.poiRenderer =
-                styledTextRenderer !== undefined ? styledTextRenderer.poiRenderer : undefined;
+    /**
+     * Visit all visible tiles and add/ their text elements to cache. The update of
+     * [[TextElement]]s is a time consuming process, and cannot be done every frame, but should only
+     * be done when the camera moved (a lot) of whenever the set of visible tiles change.
+     *
+     * The actually rendered [[TextElement]]s are stored internally until the next update is done
+     * to speed up rendering when no camera movement was detected.
+     * @param dataSourceTileList List of tiles to be rendered for each data source.
+     * @param projection The view's projection.
+     */
+    updateTextElements(dataSourceTileList, projection) {
+        logger.debug("updateTextElements");
+        if (updateStats) {
+            updateStats.clear();
         }
-        if (this.m_defaultStyle.textCanvas === undefined) {
-            if (this.m_defaultStyle.fontCatalog !== undefined) {
-                logger.warn(`FontCatalog '${this.m_defaultStyle.fontCatalog}' set in TextStyle '${this.m_defaultStyle.name}' not found, using default fontCatalog(${defaultTextCanvas.fontCatalog.name}).`);
-            }
-            this.m_defaultStyle.textCanvas = defaultTextCanvas;
-            this.m_defaultStyle.poiRenderer = defaultPoiRenderer;
-        }
-        // Initialize theme text styles.
-        this.m_theme.textStyles.forEach(element => {
-            this.m_textStyles.set(element.name, this.createTextElementStyle(element, element.name));
+        this.m_cacheInvalidated = false;
+        this.checkIfOverloaded(dataSourceTileList);
+        // Used with tile offset to compute the x coordinate offset for tiles.
+        const updateStartTime = this.overloaded && this.m_viewState.isDynamic ? harp_utils_1.PerformanceTimer.now() : undefined;
+        // TODO: HARP-7648. Skip all data sources that won't contain text.
+        // TODO: HARP-7651. Higher priority labels should be updated before lower priority ones
+        // across all data sources.
+        // TODO: HARP-7373. Use rendered tiles (tiles currently rendered to cover the view,
+        // including fallbacks if necessary) instead of visible tiles (target tiles that might not
+        // be decoded yet).
+        // Otherwise labels persistent when crossing a zoom level boundary will flicker (fade out
+        // and back in) due to the delay in decoding the visible tiles.
+        dataSourceTileList.forEach(tileList => {
+            this.updateTextElementsFromSource(tileList.dataSource, tileList.storageLevel, Array.from(tileList.renderedTiles.values()), projection, updateStartTime);
         });
-        // tslint:disable-next-line:no-unused-variable
-        for (const [name, style] of this.m_textStyles) {
-            if (style.textCanvas === undefined) {
-                if (style.fontCatalog !== undefined) {
-                    const styledTextRenderer = this.m_textRenderers.find(textRenderer => textRenderer.fontCatalog === style.fontCatalog);
-                    style.textCanvas =
-                        styledTextRenderer !== undefined
-                            ? styledTextRenderer.textCanvas
-                            : undefined;
-                    style.poiRenderer =
-                        styledTextRenderer !== undefined
-                            ? styledTextRenderer.poiRenderer
-                            : undefined;
-                }
-                if (style.textCanvas === undefined) {
-                    if (style.fontCatalog !== undefined) {
-                        logger.warn(`FontCatalog '${style.fontCatalog}' set in TextStyle '${style.name}' not found, using default fontCatalog(${defaultTextCanvas.fontCatalog.name}).`);
-                    }
-                    style.textCanvas = defaultTextCanvas;
-                    style.poiRenderer = defaultPoiRenderer;
-                }
-            }
+        if (updateStats) {
+            updateStats.log();
         }
     }
-    updateViewDistance(worldCenter, textElement) {
-        let viewDistance;
-        if (Array.isArray(textElement.points) && textElement.points.length > 1) {
-            tempPoiPosition.copy(textElement.points[0]).add(textElement.tileCenter);
-            const viewDistance0 = worldCenter.distanceTo(tempPoiPosition);
-            tempPoiPosition
-                .copy(textElement.points[textElement.points.length - 1])
-                .add(textElement.tileCenter);
-            const viewDistance1 = worldCenter.distanceTo(tempPoiPosition);
-            viewDistance = Math.min(viewDistance0, viewDistance1);
+    updateTextElementsFromSource(tileDataSource, storageLevel, visibleTiles, projection, updateStartTime) {
+        if (updateStats) {
+            updateStats.tiles += visibleTiles.length;
         }
-        else {
-            tempPoiPosition.copy(textElement.position).add(textElement.tileCenter);
-            viewDistance = worldCenter.distanceTo(tempPoiPosition);
-        }
-        textElement.renderState.viewDistance = viewDistance;
-        return viewDistance;
-    }
-    sortTextElements(textElements, maxViewDistance) {
-        const distancePriorityFactor = 0.1;
-        // Compute the sortPriority once for all elements, because the computation is done more
-        // than once per element. Also, make sorting stable by taking the index into the array into
-        // account, this is required to get repeatable results for testing.
-        for (const textElement of textElements) {
-            textElement.sortPriority =
-                textElement.priority +
-                    distancePriorityFactor -
-                    distancePriorityFactor * (textElement.renderState.viewDistance / maxViewDistance);
-        }
-        // Do the actual sort based on sortPriority
-        textElements.sort((a, b) => {
-            return b.sortPriority - a.sortPriority;
-        });
-    }
-    placeAllLabels() {
-        const renderList = this.m_mapView.visibleTileSet.dataSourceTileList;
-        const zoomLevel = this.m_mapView.zoomLevel;
-        this.checkIfOverloaded();
-        const placementStartTime = this.overloaded && this.m_mapView.isDynamicFrame ? harp_utils_1.PerformanceTimer.now() : undefined;
-        renderList.forEach(tileList => {
-            this.placeTextElements(tileList.dataSource, tileList.storageLevel, zoomLevel, tileList.visibleTiles, placementStartTime);
-        });
-        this.m_lastRenderedTextElements.length = 0;
-        this.m_secondChanceTextElements.length = 0;
-    }
-    placeTextElements(tileDataSource, storageLevel, zoomLevel, visibleTiles, placementStartTime) {
         const sortedTiles = visibleTiles;
+        // TODO: HARP-7648. Really needed? Should it be done here or in VisibleTileSet?
         sortedTiles.sort((a, b) => {
             return a.tileKey.mortonCode() - b.tileKey.mortonCode();
         });
+        // Prepare user text elements.
         for (const tile of sortedTiles) {
-            this.prepareUserTextElements(tile);
+            this.prepareTextElementGroup(tile.userTextElements, projection);
         }
         const sortedGroups = [];
         this.createSortedGroupsForSorting(tileDataSource, storageLevel, sortedTiles, sortedGroups);
-        const textElementGroups = [];
-        let numTextElementsPlaced = 0;
+        let numTextElementsUpdated = 0;
         for (const textElementLists of sortedGroups) {
-            this.selectTextElementsToPlaceByDistance(zoomLevel, textElementLists, textElementGroups);
-            // The value of placementStartTime is set if this.overloaded is true.
-            if (placementStartTime !== undefined) {
+            this.selectTextElementsToUpdateByDistance(textElementLists, projection);
+            // The value of updateStartTime is set if this.overloaded is true.
+            if (updateStartTime !== undefined) {
                 // If overloaded and all time is used up, exit early.
-                if (OVERLOAD_PLACEMENT_TIME_LIMIT > 0) {
+                if (OVERLOAD_UPDATE_TIME_LIMIT > 0) {
                     const endTime = harp_utils_1.PerformanceTimer.now();
-                    const elapsedTime = endTime - placementStartTime;
-                    if (elapsedTime > OVERLOAD_PLACEMENT_TIME_LIMIT) {
+                    const elapsedTime = endTime - updateStartTime;
+                    if (elapsedTime > OVERLOAD_UPDATE_TIME_LIMIT) {
+                        logger.debug("Update time limit exceeded.");
                         break;
                     }
                 }
-                // Try not to place too many elements. They will be checked for visibility each
+                // Try not to update too many elements. They will be checked for visibility each
                 // frame.
-                numTextElementsPlaced += textElementLists.count();
-                if (numTextElementsPlaced >= OVERLOAD_PLACED_LABEL_LIMIT) {
+                numTextElementsUpdated += textElementLists.count();
+                if (numTextElementsUpdated >= OVERLOAD_UPDATED_LABEL_LIMIT) {
+                    logger.debug("Update label limit exceeded.");
                     break;
                 }
             }
         }
     }
-    /**
-     * Process any (new) user [[TextElement]], which has not been placed by the PoiManager, to set
-     * it up for rendering.
-     *
-     * @param tile The Tile to process all user [[TextElements]] of.
-     */
-    prepareUserTextElements(tile) {
-        for (const textElement of tile.userTextElements) {
-            textElement.tileCenter = tile.center;
+    prepareTextElementGroup(textElementGroup, projection, maxViewDistance) {
+        if (textElementGroup.elements.length === 0) {
+            return;
+        }
+        const textElementSelection = (textElementState) => {
+            let { result, viewDistance } = Placement_1.checkReadyForPlacement(textElementState.element, this.m_viewState, this.m_viewCamera, this.m_poiManager, projection.type, maxViewDistance);
+            if (result === Placement_1.PrePlacementResult.Ok &&
+                !this.m_textElementStateCache.deduplicateElement(textElementState)) {
+                result = Placement_1.PrePlacementResult.Duplicate;
+                viewDistance = undefined;
+            }
+            if (updateStats) {
+                updateStats.totalLabels++;
+                updateStats.results[result]++;
+            }
+            return viewDistance;
+        };
+        const [, found] = this.m_textElementStateCache.getOrSet(textElementGroup, textElementSelection);
+        if (updateStats) {
+            ++updateStats.totalGroups;
+            if (!found) {
+                ++updateStats.newGroups;
+            }
         }
     }
     createSortedGroupsForSorting(tileDataSource, storageLevel, sortedTiles, sortedGroups) {
-        if (this.m_textRenderers.length === 0 || sortedTiles.length === 0) {
+        if (sortedTiles.length === 0) {
             return;
         }
         const tilesToRender = [];
         for (const tile of sortedTiles) {
-            tile.placedTextElements.clear();
             if (tileDataSource.shouldRenderText(storageLevel, tile.tileKey)) {
                 tilesToRender.push(tile);
             }
         }
-        // Returns true if left hand side text element was renderer more recently. This allows to
-        // keep the render state for fading.
-        const isLhsElementLatest = (lhs, rhs) => {
-            if (lhs.renderState.textRenderState === undefined ||
-                lhs.renderState.textRenderState.lastFrameNumber < 0) {
-                return false;
-            }
-            if (rhs.renderState.textRenderState === undefined ||
-                rhs.renderState.textRenderState.lastFrameNumber < 0) {
-                return true;
-            }
-            return (lhs.renderState.textRenderState.lastFrameNumber >
-                rhs.renderState.textRenderState.lastFrameNumber);
-        };
-        // Remove the duplicate point labels from this group's labels using the pointLabelCache to
-        // identify the duplicates.
-        const removeDuplicates = (groupElements) => {
-            const uniqueGroupLabels = [];
-            for (const textElement of groupElements) {
-                if (textElement.isPointLabel === true) {
-                    // Point labels may have duplicates (as can path labels), Identify them
-                    // and keep the one we already display.
-                    const duplicateLabelObj = pointLabelCache.get(textElement.text);
-                    if (duplicateLabelObj !== undefined) {
-                        const duplicateLabelList = duplicateLabelObj.list;
-                        const duplicateLabelIndex = duplicateLabelObj.listIndex;
-                        const duplicateLabel = duplicateLabelList[duplicateLabelIndex];
-                        if (duplicateLabel !== undefined &&
-                            textElement.position.distanceToSquared(duplicateLabel.position) <
-                                LABEL_DIFFERENT_THRESHOLD_SQUARED) {
-                            if (isLhsElementLatest(textElement, duplicateLabel)) {
-                                // Keep the label which was rendered last, otherwise the new
-                                // label may replace a previous label, which may lead to
-                                // flickering (because of different render state). We have
-                                // remove the label from the other list
-                                duplicateLabelList[duplicateLabelIndex] = undefined;
-                                pointLabelCache.set(textElement.text, {
-                                    list: uniqueGroupLabels,
-                                    listIndex: uniqueGroupLabels.length
-                                });
-                                uniqueGroupLabels.push(textElement);
-                            }
-                        }
-                    }
-                    else {
-                        pointLabelCache.set(textElement.text, {
-                            list: uniqueGroupLabels,
-                            listIndex: uniqueGroupLabels.length
-                        });
-                        uniqueGroupLabels.push(textElement);
-                    }
-                }
-                else {
-                    uniqueGroupLabels.push(textElement);
-                }
-            }
-            return uniqueGroupLabels;
-        };
         const groupedPriorityLists = new Map();
-        // Cache for point labels which may have duplicates in same tile or in neighboring tiles.
-        const pointLabelCache = new Map();
         for (const tile of tilesToRender) {
             for (const group of tile.textElementGroups.groups.values()) {
                 if (group.elements.length === 0) {
                     continue;
                 }
-                const uniqueGroupLabels = removeDuplicates(group.elements);
                 const foundGroup = groupedPriorityLists.get(group.priority);
                 if (foundGroup === undefined) {
-                    groupedPriorityLists.set(group.priority, new TextElementLists(group.priority, [
-                        new TileTextElements(tile, uniqueGroupLabels)
-                    ]));
+                    groupedPriorityLists.set(group.priority, new TextElementLists([new TileTextElements(tile, group)]));
                 }
                 else {
-                    foundGroup.textElementLists.push(new TileTextElements(tile, uniqueGroupLabels));
+                    foundGroup.lists.push(new TileTextElements(tile, group));
                 }
             }
         }
@@ -34757,87 +35791,104 @@ class TextElementsRenderer {
             let outString = "";
             for (const textElementLists of sortedGroups) {
                 let size = 0;
-                for (const tileTextElements of textElementLists.textElementLists) {
-                    size += tileTextElements.textElements.length;
+                for (const tileTextElements of textElementLists.lists) {
+                    size += tileTextElements.group.elements.length;
                 }
                 outString += `priority ${textElementLists.priority} size: ${size}\n`;
             }
             logger.log(outString);
         }
     }
-    getMaxDistance(farDistanceLimitRatio) {
-        const maxFarDistance = this.m_mapView.viewRanges.maximum;
-        const maxDistance = maxFarDistance * farDistanceLimitRatio;
-        return maxDistance;
-    }
-    selectTextElementsToPlaceByDistance(zoomLevel, textElementLists, textElementGroups) {
-        const farDistanceLimitRatio = Math.max(this.m_maxDistanceRatioForTextLabels, this.m_maxDistanceRatioForPoiLabels);
-        const maxDistance = this.getMaxDistance(farDistanceLimitRatio);
-        const textElementGroup = [];
-        for (const tileTextElements of textElementLists.textElementLists) {
-            const tile = tileTextElements.tile;
-            const worldOffsetX = this.m_mapView.projection.worldExtent(0, 0).max.x * tile.offset;
-            for (const textElement of tileTextElements.textElements) {
-                if (textElement === undefined || !textElement.visible) {
-                    continue;
-                }
-                // If a PoiTable is specified in the technique, the table is required to be
-                // loaded before the POI can be rendered.
-                if (textElement.poiInfo !== undefined &&
-                    textElement.poiInfo.poiTableName !== undefined) {
-                    if (this.m_mapView.poiManager.updatePoiFromPoiTable(textElement)) {
-                        // Remove poiTableName to mark this POI as processed.
-                        textElement.poiInfo.poiTableName = undefined;
-                    }
-                    else {
-                        // PoiTable has not been loaded, but is required to determine
-                        // visibility.
-                        continue;
-                    }
-                }
-                if (!textElement.visible ||
-                    !harp_utils_1.MathUtils.isClamped(zoomLevel, textElement.minZoomLevel, textElement.maxZoomLevel)) {
-                    continue;
-                }
-                if (textElement.tileCenter === undefined) {
-                    textElement.tileCenter = new THREE.Vector3(tile.center.x + worldOffsetX, tile.center.y, tile.center.z);
-                }
-                else {
-                    textElement.tileCenter.set(tile.center.x + worldOffsetX, tile.center.y, tile.center.z);
-                }
-                // If the distance is greater than allowed, skip it.
-                const textDistance = this.updateViewDistance(this.m_mapView.worldCenter, textElement);
-                if (this.m_mapView.projection.type === harp_geoutils_1.ProjectionType.Spherical) {
-                    tempPoiPosition.copy(textElement.position).add(textElement.tileCenter);
-                    tempPoiPosition.normalize();
-                    const cameraDir = new THREE.Vector3();
-                    this.m_mapView.camera.getWorldDirection(cameraDir);
-                    if (tempPoiPosition.dot(cameraDir) < -0.6 &&
-                        textDistance !== undefined &&
-                        textDistance <= maxDistance) {
-                        tile.placedTextElements.add(textElement);
-                    }
-                }
-                else if (textDistance !== undefined && textDistance <= maxDistance) {
-                    tile.placedTextElements.add(textElement);
-                }
-            }
+    selectTextElementsToUpdateByDistance(textElementLists, projection) {
+        const farDistanceLimitRatio = Math.max(this.m_options.maxDistanceRatioForTextLabels, this.m_options.maxDistanceRatioForPoiLabels);
+        const maxViewDistance = Placement_1.getMaxViewDistance(this.m_viewState, farDistanceLimitRatio);
+        for (const tileTextElements of textElementLists.lists) {
+            this.prepareTextElementGroup(tileTextElements.group, projection, maxViewDistance);
         }
-        textElementGroups.push(textElementGroup);
     }
-    renderOverlayTextElements(textElements) {
-        if (this.m_textRenderers.length === 0) {
+    placeTextElements(time, placeNewTextElements) {
+        const renderParams = {
+            numRenderedTextElements: 0,
+            fadeAnimationRunning: false,
+            time
+        };
+        const placeStartTime = this.overloaded && this.m_viewState.isDynamic ? harp_utils_1.PerformanceTimer.now() : undefined;
+        if (placementStats) {
+            placementStats.clear();
+        }
+        if (this.m_textElementStateCache.size === 0) {
+            logger.debug("Text element cache empty.");
             return;
         }
-        const screenSize = this.m_mapView.renderer.getSize(this.m_tmpVector);
+        const placeNew = this.m_forceNewLabelsPass || placeNewTextElements;
+        if (this.m_forceNewLabelsPass) {
+            if (!placeNewTextElements) {
+                logger.debug("Force new label pass");
+            }
+            this.m_forceNewLabelsPass = false;
+        }
+        const maxNumPlacedTextElements = this.m_options.maxNumVisibleLabels;
+        // TODO: HARP-7648. Potential performance improvement. Place persistent labels + rejected
+        // candidates from previous frame if there's been no placement in this one.
+        const groupStates = this.m_textElementStateCache.sortedGroupStates;
+        let currentPriority = groupStates[0].priority;
+        let currentPriorityBegin = 0;
+        for (let i = 0; i < groupStates.length; ++i) {
+            const textElementGroupState = groupStates[i];
+            if (placementStats) {
+                ++placementStats.totalGroups;
+            }
+            const newPriority = textElementGroupState.priority;
+            if (placeNew && currentPriority !== newPriority) {
+                // Place all new labels of the previous priority before placing the persistent
+                // labels of this priority.
+                this.placeNewTextElements(currentPriorityBegin, i, renderParams);
+                if (isPlacementTimeExceeded(placeStartTime)) {
+                    break;
+                }
+                currentPriority = newPriority;
+                currentPriorityBegin = i;
+            }
+            if (!this.placeTextElementGroup(textElementGroupState, renderParams, maxNumPlacedTextElements, Pass.PersistentLabels)) {
+                break;
+            }
+            if (isPlacementTimeExceeded(placeStartTime)) {
+                break;
+            }
+        }
+        if (placeNew) {
+            // Place new text elements of the last priority.
+            this.placeNewTextElements(currentPriorityBegin, groupStates.length, renderParams);
+        }
+        if (placementStats) {
+            placementStats.numRenderedTextElements = renderParams.numRenderedTextElements;
+            placementStats.log();
+        }
+        if (!this.m_options.disableFading && renderParams.fadeAnimationRunning) {
+            this.m_viewUpdateCallback();
+        }
+    }
+    placeNewTextElements(beginGroupIndex, endGroupIndex, renderParams) {
+        const groupStates = this.m_textElementStateCache.sortedGroupStates;
+        for (let i = beginGroupIndex; i < endGroupIndex; ++i) {
+            if (!this.placeTextElementGroup(groupStates[i], renderParams, this.m_options.maxNumVisibleLabels, Pass.NewLabels)) {
+                break;
+            }
+        }
+    }
+    placeOverlayTextElements() {
+        if (this.m_overlayTextElements === undefined || this.m_overlayTextElements.length === 0) {
+            return;
+        }
+        const screenSize = this.m_renderer.getSize(this.m_tmpVector);
         const screenXOrigin = -screenSize.width / 2.0;
         const screenYOrigin = screenSize.height / 2.0;
         const tempAdditionParams = {};
         const tempBufferAdditionParams = {};
         // Place text elements one by one.
-        for (const textElement of textElements) {
+        for (const textElement of this.m_overlayTextElements) {
             // Get the TextElementStyle.
-            const textElementStyle = this.getTextElementStyle(textElement.style);
+            const textElementStyle = this.m_textStyleCache.getTextElementStyle(textElement.style);
             const textCanvas = textElementStyle.textCanvas;
             if (textCanvas === undefined) {
                 continue;
@@ -34861,7 +35912,7 @@ class TextElementsRenderer {
                         .loadCharset(textElement.text, textElement.renderStyle)
                         .then(() => {
                         textElement.loadingState = TextElement_1.LoadingState.Loaded;
-                        this.m_mapView.update();
+                        this.m_viewUpdateCallback();
                     });
                 }
             }
@@ -34920,7 +35971,7 @@ class TextElementsRenderer {
                 }
                 // Get the screen points that define the label's segments and create a path with
                 // them.
-                // TODO: Optimize array allocations.
+                // TODO: HARP-7648. Optimize array allocations.
                 const screenPoints = [];
                 for (const pt of textElement.path) {
                     const pX = tempScreenPosition.x + pt.x * screenSize.width;
@@ -34940,25 +35991,25 @@ class TextElementsRenderer {
             }
         }
     }
-    getDistanceScalingFactor(label, distance) {
+    getDistanceScalingFactor(label, distance, lookAtDistance) {
         // Distance scale is based on relation between camera focus point distance and
         // the actual label distance. For labels close to camera look at point the scale
         // remains unchanged, the farther is label from that point the smaller size it is
         // rendered in screen space. This method is unaffected by near and far clipping planes
         // distances, but may be improved by taking FOV into equation or customizing the
         // focus point screen position based on horizont, actual ground, tilt ets.
-        let factor = this.m_mapView.lookAtDistance / distance;
+        let factor = lookAtDistance / distance;
         // The label.distanceScale property defines the influence ratio at which
         // distance affects the final scaling of label.
         factor = 1.0 + (factor - 1.0) * label.distanceScale;
         // Preserve the constraints
-        factor = Math.max(factor, this.m_labelDistanceScaleMin);
-        factor = Math.min(factor, this.m_labelDistanceScaleMax);
+        factor = Math.max(factor, this.m_options.labelDistanceScaleMin);
+        factor = Math.min(factor, this.m_options.labelDistanceScaleMax);
         return factor;
     }
-    getDistanceFadingFactor(label, maxVisibilityDist) {
+    getDistanceFadingFactor(label, state, maxVisibilityDist) {
         let distanceFadeValue = 1.0;
-        const textDistance = label.renderState.viewDistance;
+        const textDistance = state.viewDistance;
         if (textDistance !== undefined && label.fadeFar !== undefined && label.fadeFar > 0.0) {
             const fadeNear = label.fadeNear === undefined ? 0.0 : label.fadeNear;
             const fadeFar = label.fadeFar;
@@ -34970,123 +36021,118 @@ class TextElementsRenderer {
         }
         return distanceFadeValue;
     }
-    addPointLabel(pointLabel, iconRenderState, textRenderState, position, screenPosition, poiRenderer, textCanvas, stats, mapViewState, temp, renderedTextElements, secondChanceTextElements) {
-        const numSecondChanceLabels = this.m_numSecondChanceLabels;
-        const poiTextMaxDistance = this.getMaxDistance(this.m_maxDistanceRatioForPoiLabels);
+    addPointLabel(labelState, groupState, position, screenPosition, poiRenderer, textCanvas, renderParams, temp, iconIndex) {
+        const pointLabel = labelState.element;
+        const textRenderState = labelState.textRenderState;
+        harp_utils_1.assert(iconIndex === undefined || labelState.iconRenderStates !== undefined);
+        const iconRenderState = iconIndex !== undefined
+            ? labelState.iconRenderStates[iconIndex]
+            : labelState.iconRenderState;
+        harp_utils_1.assert(iconRenderState !== undefined);
+        const poiTextMaxDistance = Placement_1.getMaxViewDistance(this.m_viewState, this.m_options.maxDistanceRatioForPoiLabels);
+        const hasText = textRenderState !== undefined && pointLabel.text !== "";
         // Find the label's original position.
         tempScreenPosition.x = tempPoiScreenPosition.x = screenPosition.x;
         tempScreenPosition.y = tempPoiScreenPosition.y = screenPosition.y;
-        // Offset the label accordingly to alignment (and POI, if any).
-        let xOffset = (pointLabel.xOffset || 0.0) *
-            (pointLabel.layoutStyle.horizontalAlignment === harp_text_canvas_1.HorizontalAlignment.Right
-                ? -1.0
-                : 1.0);
-        let yOffset = (pointLabel.yOffset || 0.0) *
-            (pointLabel.layoutStyle.verticalAlignment === harp_text_canvas_1.VerticalAlignment.Below ? -1.0 : 1.0);
-        if (pointLabel.poiInfo !== undefined) {
-            xOffset +=
-                pointLabel.poiInfo.computedWidth *
-                    (0.5 + pointLabel.layoutStyle.horizontalAlignment);
-            yOffset +=
-                pointLabel.poiInfo.computedHeight *
-                    (0.5 + pointLabel.layoutStyle.verticalAlignment);
-        }
-        tempScreenPosition.x += xOffset;
-        tempScreenPosition.y += yOffset;
-        // If we try to place text above their current position, we need to compensate for
-        // its bounding box height.
-        if (pointLabel.layoutStyle.verticalAlignment === harp_text_canvas_1.VerticalAlignment.Above) {
-            tempScreenPosition.y += -pointLabel.bounds.min.y;
-        }
         // Scale the text depending on the label's distance to the camera.
         let textScale = 1.0;
         let distanceScaleFactor = 1.0;
-        const textDistance = this.m_mapView.worldCenter.distanceTo(position);
+        const textDistance = this.m_viewState.worldCenter.distanceTo(position);
         if (textDistance !== undefined) {
             if (pointLabel.fadeFar !== undefined &&
                 (pointLabel.fadeFar <= 0.0 ||
-                    pointLabel.fadeFar * mapViewState.maxVisibilityDist < textDistance)) {
+                    pointLabel.fadeFar * this.m_viewState.maxVisibilityDist < textDistance)) {
                 // The label is farther away than fadeFar value, which means it is totally
                 // transparent.
+                if (placementStats) {
+                    ++placementStats.tooFar;
+                }
                 return false;
             }
-            pointLabel.renderState.viewDistance = textDistance;
-            distanceScaleFactor = this.getDistanceScalingFactor(pointLabel, textDistance);
+            labelState.setViewDistance(textDistance, groupState);
+            distanceScaleFactor = this.getDistanceScalingFactor(pointLabel, textDistance, this.m_viewState.lookAtDistance);
             textScale *= distanceScaleFactor;
         }
-        const distanceFadeFactor = this.getDistanceFadingFactor(pointLabel, mapViewState.maxVisibilityDist);
+        const distanceFadeFactor = this.getDistanceFadingFactor(pointLabel, labelState, this.m_viewState.maxVisibilityDist);
         // Check if there is need to check for screen space for the label's icon.
         const poiInfo = pointLabel.poiInfo;
         let iconSpaceAvailable = true;
         // Check if icon should be rendered at this zoomLevel
-        let renderIcon = poiInfo === undefined ||
-            harp_utils_1.MathUtils.isClamped(mapViewState.zoomLevel, poiInfo.iconMinZoomLevel, poiInfo.iconMaxZoomLevel);
-        if (renderIcon &&
-            poiInfo !== undefined &&
-            poiRenderer.prepareRender(pointLabel, mapViewState.zoomLevel)) {
-            if (poiInfo.isValid === false) {
+        let renderIcon = poiInfo !== undefined &&
+            harp_utils_1.MathUtils.isClamped(this.m_viewState.zoomLevel, poiInfo.iconMinZoomLevel, poiInfo.iconMaxZoomLevel) &&
+            poiInfo.isValid !== false;
+        const iconReady = renderIcon && poiRenderer.prepareRender(pointLabel, this.m_viewState.zoomLevel);
+        if (iconReady) {
+            const iconIsVisible = poiRenderer.computeScreenBox(poiInfo, tempPoiScreenPosition, distanceScaleFactor, this.m_screenCollisions, this.m_viewState.zoomLevel, tempBox2D);
+            // If the icon is prepared and valid, but just not visible, try again next time.
+            if (!iconIsVisible) {
+                // Forced making it un-current.
+                iconRenderState.lastFrameNumber = -1;
+                if (placementStats) {
+                    ++placementStats.numNotVisible;
+                }
                 return false;
             }
-            const iconIsVisible = poiRenderer.computeScreenBox(poiInfo, tempPoiScreenPosition, distanceScaleFactor, this.m_screenCollisions, mapViewState.zoomLevel, tempBox2D);
-            if (iconIsVisible) {
+            if (groupState.visited) {
                 iconSpaceAvailable = poiRenderer.isSpaceAvailable(this.m_screenCollisions, tempBox2D);
                 // Reserve screen space if necessary, return false if failed:
                 if (
                 // Check if free screen space is available:
                 !iconSpaceAvailable) {
                     if (!iconRenderState.isVisible()) {
+                        if (placementStats) {
+                            ++placementStats.numNotVisible;
+                        }
                         return false;
                     }
                     else if (!(poiInfo.mayOverlap === true) && !iconRenderState.isFadingOut()) {
-                        this.startFadeOut(iconRenderState, mapViewState.frameNumber, mapViewState.time);
-                        if (textRenderState !== undefined && textRenderState.isVisible()) {
-                            this.startFadeOut(textRenderState, mapViewState.frameNumber, mapViewState.time);
+                        iconRenderState.startFadeOut(this.m_viewState.frameNumber, renderParams.time);
+                        if (hasText && textRenderState.isVisible()) {
+                            textRenderState.startFadeOut(this.m_viewState.frameNumber, renderParams.time);
                         }
                     }
                 }
                 else {
-                    if (iconRenderState.lastFrameNumber < mapViewState.frameNumber - 1 ||
+                    if (iconRenderState.lastFrameNumber < this.m_viewState.frameNumber - 1 ||
                         iconRenderState.isFadingOut() ||
                         iconRenderState.isFadedOut()) {
-                        this.startFadeIn(iconRenderState, mapViewState.frameNumber, mapViewState.time);
+                        iconRenderState.startFadeIn(this.m_viewState.frameNumber, renderParams.time);
                     }
                 }
             }
-            // If the icon is prepared and valid, but just not visible, try again next time.
-            else {
-                if (secondChanceTextElements !== undefined &&
-                    secondChanceTextElements.length < numSecondChanceLabels) {
-                    secondChanceTextElements.push(pointLabel);
-                }
-                // Forced making it un-current.
-                iconRenderState.lastFrameNumber = -1;
-                return false;
-            }
-            if (iconRenderState.isFading()) {
-                this.updateFading(iconRenderState, mapViewState.time);
+            else if (iconRenderState.isVisible()) {
+                iconRenderState.startFadeOut(this.m_viewState.frameNumber, renderParams.time);
+                iconRenderState.lastFrameNumber = this.m_viewState.frameNumber;
             }
         }
+        else if (renderIcon && poiInfo.isValid !== false) {
+            // Ensure that text elements still loading icons get a chance to be rendered if
+            // there's no text element updates in the next frames.
+            this.m_forceNewLabelsPass = true;
+        }
         // Check if label should be rendered at this zoomLevel
-        const renderText = poiInfo === undefined ||
-            mapViewState.zoomLevel === undefined ||
-            harp_utils_1.MathUtils.isClamped(mapViewState.zoomLevel, poiInfo.iconMinZoomLevel, poiInfo.iconMaxZoomLevel);
+        const renderText = hasText &&
+            (poiInfo === undefined ||
+                this.m_viewState.zoomLevel === undefined ||
+                harp_utils_1.MathUtils.isClamped(this.m_viewState.zoomLevel, poiInfo.iconMinZoomLevel, poiInfo.iconMaxZoomLevel));
         // Check if we should render the label's text.
         const doRenderText = 
         // Render if between min/max zoom level
         renderText &&
             // Do not render if the distance is too great and distance shouldn't be ignored.
             (pointLabel.ignoreDistance === true ||
-                (pointLabel.renderState.viewDistance === undefined ||
-                    pointLabel.renderState.viewDistance < poiTextMaxDistance)) &&
+                labelState.viewDistance === undefined ||
+                labelState.viewDistance < poiTextMaxDistance) &&
             // Do not render text if POI cannot be rendered and is not optional.
             (poiInfo === undefined || poiInfo.isValid === true || poiInfo.iconIsOptional !== false);
         // Render the label's text...
         // textRenderState is always defined at this point.
-        if (textRenderState !== undefined && doRenderText && pointLabel.text !== "") {
+        if (doRenderText) {
+            tempScreenPosition.add(Placement_1.computePointTextOffset(pointLabel, tempTextOffset));
             // Adjust the label positioning to match its bounding box.
             tempPosition.x = tempScreenPosition.x;
             tempPosition.y = tempScreenPosition.y;
-            tempPosition.z = pointLabel.renderDistance;
+            tempPosition.z = labelState.renderDistance;
             tempBox2D.x = tempScreenPosition.x + pointLabel.bounds.min.x * textScale;
             tempBox2D.y = tempScreenPosition.y + pointLabel.bounds.min.y * textScale;
             tempBox2D.w = (pointLabel.bounds.max.x - pointLabel.bounds.min.x) * textScale;
@@ -35098,21 +36144,21 @@ class TextElementsRenderer {
             tempBox2D.h += 4 * textScale;
             // Check the text visibility.
             if (!this.m_screenCollisions.isVisible(tempBox2D)) {
-                if (secondChanceTextElements !== undefined &&
-                    secondChanceTextElements.length < numSecondChanceLabels) {
-                    secondChanceTextElements.push(pointLabel);
+                if (placementStats) {
+                    placementStats.numPoiTextsInvisible++;
                 }
-                stats.numPoiTextsInvisible++;
+                labelState.reset();
                 return false;
             }
             const textIsOptional = pointLabel.poiInfo !== undefined && pointLabel.poiInfo.textIsOptional === true;
             const textIsFadingIn = textRenderState.isFadingIn();
             const textIsFadingOut = textRenderState.isFadingOut();
             const textSpaceAvailable = !this.m_screenCollisions.isAllocated(tempBox2D);
-            const textVisible = pointLabel.textMayOverlap ||
-                textSpaceAvailable ||
-                textIsFadingIn ||
-                textIsFadingOut;
+            const textVisible = groupState.visited &&
+                (pointLabel.textMayOverlap ||
+                    textSpaceAvailable ||
+                    textIsFadingIn ||
+                    textIsFadingOut);
             if (textVisible) {
                 // Compute the TextBufferObject when we know we're gonna render this label.
                 if (pointLabel.textBufferObject === undefined) {
@@ -35126,21 +36172,21 @@ class TextElementsRenderer {
                 // renderTextDuringMovements is not true.
                 if ((textIsFadingIn ||
                     textIsFadingOut ||
-                    !mapViewState.cameraIsMoving ||
-                    (poiInfo === undefined || poiInfo.renderTextDuringMovements === true)) &&
+                    !this.m_viewState.cameraIsMoving ||
+                    poiInfo === undefined ||
+                    poiInfo.renderTextDuringMovements === true) &&
                     !iconRenderState.isFadedOut()) {
                     let textFading = false;
                     if (!textRenderState.isFadingOut() &&
                         textSpaceAvailable &&
                         iconSpaceAvailable) {
-                        textFading = this.checkStartFadeIn(textRenderState, mapViewState.frameNumber, mapViewState.time, true);
+                        textFading = textRenderState.checkStartFadeIn(this.m_viewState.frameNumber, renderParams.time, true);
                     }
-                    else if (textRenderState.isFading()) {
-                        this.updateFading(textRenderState, mapViewState.time);
-                        textFading = true;
+                    else {
+                        textFading = textRenderState.isFading();
                     }
-                    stats.fadeAnimationRunning =
-                        stats.fadeAnimationRunning || textIsFadingOut || textFading;
+                    renderParams.fadeAnimationRunning =
+                        renderParams.fadeAnimationRunning || textIsFadingOut || textFading;
                     const opacity = textRenderState.opacity;
                     const backgroundIsVisible = pointLabel.renderStyle.backgroundOpacity > 0 &&
                         textCanvas.textRenderStyle.fontSize.backgroundSize > 0;
@@ -35158,71 +36204,68 @@ class TextElementsRenderer {
                         : undefined;
                     textCanvas.addTextBufferObject(pointLabel.textBufferObject, temp.bufferAdditionParams);
                 }
-                stats.numRenderedPoiTexts++;
+                if (placementStats) {
+                    placementStats.numRenderedPoiTexts++;
+                }
             }
-            // If the text is not visible nor optional, we won't render the icon neither.
             else if (!renderIcon || !textIsOptional) {
+                // If the text is not visible nor optional, we won't render the icon neither.
                 renderIcon = false;
                 if (pointLabel.poiInfo === undefined || iconRenderState.isVisible()) {
                     if (pointLabel.poiInfo !== undefined) {
-                        this.startFadeOut(iconRenderState, mapViewState.frameNumber, mapViewState.time);
+                        iconRenderState.startFadeOut(this.m_viewState.frameNumber, renderParams.time);
                     }
-                    if (textRenderState !== undefined && textRenderState.isVisible()) {
-                        const iconStartedFadeOut = this.checkStartFadeOut(textRenderState, mapViewState.frameNumber, mapViewState.time);
-                        stats.fadeAnimationRunning =
-                            stats.fadeAnimationRunning || iconStartedFadeOut;
+                    if (textRenderState.isVisible()) {
+                        const iconStartedFadeOut = textRenderState.checkStartFadeOut(this.m_viewState.frameNumber, renderParams.time);
+                        renderParams.fadeAnimationRunning =
+                            renderParams.fadeAnimationRunning || iconStartedFadeOut;
                     }
-                    this.startFadeOut(iconRenderState, mapViewState.frameNumber, mapViewState.time);
                 }
                 else {
-                    if (secondChanceTextElements !== undefined &&
-                        secondChanceTextElements.length < numSecondChanceLabels) {
-                        secondChanceTextElements.push(pointLabel);
+                    if (placementStats) {
+                        placementStats.numPoiTextsInvisible++;
                     }
-                    stats.numPoiTextsInvisible++;
                     return false;
                 }
             }
             // If the label is currently visible, fade it out.
-            else if (textRenderState !== undefined && textRenderState.isVisible()) {
-                const iconStartedFadeOut = this.checkStartFadeOut(textRenderState, mapViewState.frameNumber, mapViewState.time);
-                stats.fadeAnimationRunning = stats.fadeAnimationRunning || iconStartedFadeOut;
+            else if (textRenderState.isVisible()) {
+                const iconStartedFadeOut = textRenderState.checkStartFadeOut(this.m_viewState.frameNumber, renderParams.time);
+                renderParams.fadeAnimationRunning =
+                    renderParams.fadeAnimationRunning || iconStartedFadeOut;
             }
         }
         // ... and render the icon (if any).
-        if (renderIcon && poiInfo !== undefined && poiRenderer.poiIsRenderable(poiInfo)) {
-            const iconStartedFadeIn = this.checkStartFadeIn(iconRenderState, mapViewState.frameNumber, mapViewState.time);
-            stats.fadeAnimationRunning = stats.fadeAnimationRunning || iconStartedFadeIn;
-            poiRenderer.renderPoi(poiInfo, tempPoiScreenPosition, this.m_screenCollisions, distanceScaleFactor, poiInfo.reserveSpace !== false, iconRenderState.opacity * distanceFadeFactor, mapViewState.zoomLevel);
-            iconRenderState.lastFrameNumber = mapViewState.frameNumber;
-            stats.numRenderedPoiIcons++;
+        if (renderIcon && TextElement_1.poiIsRenderable(poiInfo)) {
+            const iconStartedFadeIn = iconRenderState.checkStartFadeIn(this.m_viewState.frameNumber, renderParams.time);
+            renderParams.fadeAnimationRunning =
+                renderParams.fadeAnimationRunning || iconStartedFadeIn;
+            poiRenderer.renderPoi(poiInfo, tempPoiScreenPosition, this.m_screenCollisions, labelState.renderDistance, distanceScaleFactor, poiInfo.reserveSpace !== false, iconRenderState.opacity * distanceFadeFactor, this.m_viewState.zoomLevel);
+            iconRenderState.lastFrameNumber = this.m_viewState.frameNumber;
+            if (placementStats) {
+                placementStats.numRenderedPoiIcons++;
+            }
         }
-        // Add this label to the list of rendered elements.
-        if (renderedTextElements !== undefined) {
-            renderedTextElements.push(pointLabel);
-        }
-        stats.numRenderedTextElements++;
+        renderParams.numRenderedTextElements++;
         return true;
     }
-    addPoiLabel(poiLabel, poiRenderer, textCanvas, stats, mapViewState, temp, renderedTextElements, secondChanceTextElements) {
-        // Calculate the world position of this label.
-        tempPosition.copy(poiLabel.position).add(poiLabel.tileCenter);
+    addPoiLabel(labelState, groupState, poiRenderer, textCanvas, renderParams, temp) {
+        const poiLabel = labelState.element;
+        const worldPosition = poiLabel.points;
         // Only process labels frustum-clipped labels
-        if (this.m_screenProjector.project(tempPosition, tempScreenPosition) !== undefined) {
-            // Initialize the POI's icon and text render states (fading).
-            if (poiLabel.renderState.initialized === false) {
-                poiLabel.renderState.initialize(TextElementType_1.TextElementType.PoiLabel, this.m_mapView.disableFading);
-            }
-            // Add this POI as a point label.
-            this.addPointLabel(poiLabel, poiLabel.renderState.iconRenderState, poiLabel.renderState.textRenderState, tempPosition, tempScreenPosition, poiRenderer, textCanvas, stats, mapViewState, temp, renderedTextElements, secondChanceTextElements);
+        if (this.m_screenProjector.project(worldPosition, tempScreenPosition) === undefined) {
+            return false;
         }
+        // Add this POI as a point label.
+        return this.addPointLabel(labelState, groupState, worldPosition, tempScreenPosition, poiRenderer, textCanvas, renderParams, temp);
     }
-    addLineMarkerLabel(lineMarkerLabel, poiRenderer, shieldGroups, textCanvas, stats, mapViewState, temp, renderedTextElements, secondChanceTextElements) {
+    addLineMarkerLabel(labelState, groupState, poiRenderer, shieldGroups, textCanvas, renderParams, temp) {
+        const lineMarkerLabel = labelState.element;
         // Early exit if the line marker doesn't have the necessary data.
         const poiInfo = lineMarkerLabel.poiInfo;
         if (lineMarkerLabel.path === undefined ||
             lineMarkerLabel.path.length === 0 ||
-            !poiRenderer.prepareRender(lineMarkerLabel, mapViewState.zoomLevel)) {
+            !poiRenderer.prepareRender(lineMarkerLabel, this.m_viewState.zoomLevel)) {
             return;
         }
         // Initialize the shield group for this lineMarker.
@@ -35234,22 +36277,17 @@ class TextElementsRenderer {
                 shieldGroups[poiInfo.shieldGroupIndex] = shieldGroup;
             }
         }
-        // Create an individual render state for every individual point of the lineMarker.
-        if (lineMarkerLabel.renderState.initialized === false) {
-            lineMarkerLabel.renderState.initialize(TextElementType_1.TextElementType.LineMarker, this.m_mapView.disableFading, lineMarkerLabel.path.length);
-        }
         const lineTechnique = poiInfo.technique;
         const minDistanceSqr = lineTechnique.minDistance !== undefined
             ? lineTechnique.minDistance * lineTechnique.minDistance
             : 0;
         // Process markers (with shield groups).
         if (minDistanceSqr > 0 && shieldGroup !== undefined) {
-            for (let i = 0; i < lineMarkerLabel.path.length; i++) {
-                const point = lineMarkerLabel.path[i];
-                // Calculate the world position of this label.
-                tempPosition.copy(point).add(lineMarkerLabel.tileCenter);
+            const path = lineMarkerLabel.path;
+            for (let pointIndex = 0; pointIndex < path.length; ++pointIndex) {
+                const point = path[pointIndex];
                 // Only process labels frustum-clipped labels
-                if (this.m_screenProjector.project(tempPosition, tempScreenPosition) !== undefined) {
+                if (this.m_screenProjector.project(point, tempScreenPosition) !== undefined) {
                     // Find a suitable location for the lineMarker to be placed at.
                     let tooClose = false;
                     for (let j = 0; j < shieldGroup.length; j += 2) {
@@ -35262,7 +36300,7 @@ class TextElementsRenderer {
                     // Place it as a point label if it's not to close to other marker in the
                     // same shield group.
                     if (!tooClose) {
-                        if (this.addPointLabel(lineMarkerLabel, lineMarkerLabel.renderState.iconRenderStates[i], undefined, tempPosition, tempScreenPosition, poiRenderer, textCanvas, stats, mapViewState, temp, renderedTextElements, secondChanceTextElements)) {
+                        if (this.addPointLabel(labelState, groupState, point, tempScreenPosition, poiRenderer, textCanvas, renderParams, temp, pointIndex)) {
                             shieldGroup.push(tempScreenPosition.x, tempScreenPosition.y);
                         }
                     }
@@ -35271,30 +36309,43 @@ class TextElementsRenderer {
         }
         // Process markers (without shield groups).
         else {
-            for (let i = 0; i < lineMarkerLabel.path.length; i++) {
-                const point = lineMarkerLabel.path[i];
-                // Calculate the world position of this label.
-                tempPosition.copy(point).add(lineMarkerLabel.tileCenter);
+            const path = lineMarkerLabel.path;
+            for (let pointIndex = 0; pointIndex < path.length; ++pointIndex) {
+                const point = path[pointIndex];
                 // Only process labels frustum-clipped labels
-                if (this.m_screenProjector.project(tempPosition, tempScreenPosition) !== undefined) {
-                    this.addPointLabel(lineMarkerLabel, lineMarkerLabel.renderState.iconRenderStates[i], undefined, tempPosition, tempScreenPosition, poiRenderer, textCanvas, stats, mapViewState, temp, renderedTextElements, secondChanceTextElements);
+                if (this.m_screenProjector.project(point, tempScreenPosition) !== undefined) {
+                    this.addPointLabel(labelState, groupState, point, tempScreenPosition, poiRenderer, textCanvas, renderParams, temp, pointIndex);
                 }
             }
         }
     }
-    addPathLabel(pathLabel, screenPoints, poiRenderer, textCanvas, stats, mapViewState, temp, renderedTextElements, secondChanceTextElements) {
-        const textMaxDistance = this.getMaxDistance(this.m_maxDistanceRatioForTextLabels);
+    addPathLabel(labelState, groupState, screenPoints, textCanvas, renderParams, temp) {
+        // TODO: HARP-7649. Add fade out transitions for path labels.
+        const textMaxDistance = Placement_1.getMaxViewDistance(this.m_viewState, this.m_options.maxDistanceRatioForTextLabels);
+        const pathLabel = labelState.element;
         // Limit the text rendering of path labels in the far distance.
         if (!(pathLabel.ignoreDistance === true ||
-            pathLabel.renderState.viewDistance === undefined ||
-            pathLabel.renderState.viewDistance < textMaxDistance)) {
+            labelState.viewDistance === undefined ||
+            labelState.viewDistance < textMaxDistance)) {
+            if (placementStats) {
+                ++placementStats.tooFar;
+            }
+            labelState.reset();
             return false;
         }
         if (pathLabel.fadeFar !== undefined &&
             (pathLabel.fadeFar <= 0.0 ||
-                pathLabel.fadeFar * mapViewState.maxVisibilityDist < pathLabel.renderDistance)) {
+                pathLabel.fadeFar * this.m_viewState.maxVisibilityDist < labelState.renderDistance)) {
             // The label is farther away than fadeFar value, which means it is totally
             // transparent
+            if (placementStats) {
+                ++placementStats.tooFar;
+            }
+            labelState.reset();
+            return false;
+        }
+        if (!groupState.visited) {
+            labelState.reset();
             return false;
         }
         // Compute values common for all glyphs in the label.
@@ -35316,10 +36367,10 @@ class TextElementsRenderer {
             }
         }
         // Update the real rendering distance to have smooth fading and scaling
-        this.updateViewDistance(this.m_mapView.worldCenter, pathLabel);
-        const textRenderDistance = -pathLabel.renderDistance;
+        labelState.setViewDistance(Placement_1.computeViewDistance(this.m_viewState.worldCenter, pathLabel), groupState);
+        const textRenderDistance = -labelState.renderDistance;
         // Scale the text depending on the label's distance to the camera.
-        const distanceScaleFactor = this.getDistanceScalingFactor(pathLabel, textRenderDistance);
+        const distanceScaleFactor = this.getDistanceScalingFactor(pathLabel, textRenderDistance, this.m_viewState.lookAtDistance);
         textScale *= distanceScaleFactor;
         // Scale the path label correctly.
         const prevSize = textCanvas.textRenderStyle.fontSize.size;
@@ -35329,8 +36380,17 @@ class TextElementsRenderer {
         temp.measurementParams.path = textPath;
         temp.measurementParams.outputCharacterBounds = tempBoxes;
         temp.measurementParams.letterCaseArray = pathLabel.glyphCaseArray;
+        // TODO: HARP-7648. TextCanvas.measureText does the placement as in TextCanvas.addText but
+        // without storing the result. If the measurement succeeds, the placement work is done
+        // twice.
+        // This could be done in one step (e.g measureAndAddText). Collision test could be injected
+        // in the middle as a function.
         if (!textCanvas.measureText(pathLabel.glyphs, tempBox, temp.measurementParams)) {
             textCanvas.textRenderStyle.fontSize.size = prevSize;
+            if (placementStats) {
+                ++placementStats.numNotVisible;
+            }
+            labelState.reset();
             return false;
         }
         // Perform per-character collision checks.
@@ -35342,31 +36402,30 @@ class TextElementsRenderer {
             if (!this.m_screenCollisions.isVisible(tempBox2D) ||
                 (!pathLabel.textMayOverlap && this.m_screenCollisions.isAllocated(tempBox2D))) {
                 textCanvas.textRenderStyle.fontSize.size = prevSize;
+                if (placementStats) {
+                    ++placementStats.numNotVisible;
+                }
                 return false;
             }
         }
         // Fade-in after skipping rendering during movement.
         // NOTE: Shouldn't this only happen once we know the label is gonna be visible?
-        if (pathLabel.renderState.initialized === false) {
-            pathLabel.renderState.initialize(TextElementType_1.TextElementType.PathLabel, this.m_mapView.disableFading);
+        if (labelState.textRenderState.state === RenderState_1.FadingState.Undefined ||
+            labelState.textRenderState.lastFrameNumber < this.m_viewState.frameNumber - 1) {
+            labelState.textRenderState.startFadeIn(this.m_viewState.frameNumber, renderParams.time);
         }
-        if (pathLabel.renderState.textRenderState.state === RenderState_1.FadingState.Undefined ||
-            pathLabel.renderState.textRenderState.lastFrameNumber < mapViewState.frameNumber - 1) {
-            this.startFadeIn(pathLabel.renderState.textRenderState, mapViewState.frameNumber, mapViewState.time);
-        }
-        const startedFadeIn = this.checkStartFadeIn(pathLabel.renderState.textRenderState, mapViewState.frameNumber, mapViewState.time);
-        stats.fadeAnimationRunning = stats.fadeAnimationRunning || startedFadeIn;
-        if (pathLabel.renderState.textRenderState.isFading()) {
-            opacity =
-                pathLabel.renderState.textRenderState.opacity * pathLabel.renderStyle.opacity;
+        const startedFadeIn = labelState.textRenderState.checkStartFadeIn(this.m_viewState.frameNumber, renderParams.time);
+        renderParams.fadeAnimationRunning = renderParams.fadeAnimationRunning || startedFadeIn;
+        if (labelState.textRenderState.isFading()) {
+            opacity = labelState.textRenderState.opacity * pathLabel.renderStyle.opacity;
         }
         const prevOpacity = textCanvas.textRenderStyle.opacity;
         const prevBgOpacity = textCanvas.textRenderStyle.backgroundOpacity;
-        const distanceFadeFactor = this.getDistanceFadingFactor(pathLabel, mapViewState.maxVisibilityDist);
+        const distanceFadeFactor = this.getDistanceFadingFactor(pathLabel, labelState, this.m_viewState.maxVisibilityDist);
         textCanvas.textRenderStyle.opacity = opacity * distanceFadeFactor;
         textCanvas.textRenderStyle.backgroundOpacity =
             textCanvas.textRenderStyle.opacity * pathLabel.renderStyle.backgroundOpacity;
-        tempPosition.z = pathLabel.renderDistance;
+        tempPosition.z = labelState.renderDistance;
         temp.additionParams.path = textPath;
         temp.additionParams.layer = pathLabel.renderOrder;
         temp.additionParams.letterCaseArray = pathLabel.glyphCaseArray;
@@ -35380,53 +36439,28 @@ class TextElementsRenderer {
             tempBox2D.h = tempBox.max.y - tempBox.min.y;
             this.m_screenCollisions.allocate(tempBox2D);
         }
-        // Add this label to the list of rendered elements.
-        if (renderedTextElements !== undefined) {
-            renderedTextElements.push(pathLabel);
-        }
-        stats.numRenderedTextElements++;
+        renderParams.numRenderedTextElements++;
         // Restore previous style values for text elements using the same style.
         textCanvas.textRenderStyle.fontSize.size = prevSize;
         textCanvas.textRenderStyle.opacity = prevOpacity;
         textCanvas.textRenderStyle.backgroundOpacity = prevBgOpacity;
         return true;
     }
-    checkForSmallLabels(textElement) {
-        let indexOfFirstVisibleScreenPoint = -1;
+    checkForSmallLabels(textElement, screenPoints) {
         // Get the screen points that define the label's segments and create a path with
         // them.
-        const screenPoints = [];
-        let minX = Number.MAX_SAFE_INTEGER;
-        let maxX = Number.MIN_SAFE_INTEGER;
-        let minY = Number.MAX_SAFE_INTEGER;
-        let maxY = Number.MIN_SAFE_INTEGER;
+        screenPoints.length = 0;
+        let anyPointVisible = false;
         for (const pt of textElement.path) {
-            tempPosition.copy(pt).add(textElement.tileCenter);
-            const screenPoint = this.m_screenProjector.project(tempPosition, tempScreenPosition);
+            // Skip invisible points at the beginning of the path.
+            const screenPoint = anyPointVisible
+                ? this.m_screenProjector.project(pt, tempScreenPosition)
+                : this.m_screenProjector.projectOnScreen(pt, tempScreenPosition);
             if (screenPoint === undefined) {
                 continue;
             }
+            anyPointVisible = true;
             screenPoints.push(tempScreenPosition.clone());
-            if (screenPoint.x < minX) {
-                minX = screenPoint.x;
-            }
-            if (screenPoint.x > maxX) {
-                maxX = screenPoint.x;
-            }
-            if (screenPoint.y < minY) {
-                minY = screenPoint.y;
-            }
-            if (screenPoint.y > maxY) {
-                maxY = screenPoint.y;
-            }
-            if (indexOfFirstVisibleScreenPoint < 0) {
-                const firstIndex = screenPoints.findIndex(p2 => {
-                    return this.m_screenCollisions.screenBounds.contains(p2.x, p2.y);
-                });
-                if (firstIndex >= 0) {
-                    indexOfFirstVisibleScreenPoint = firstIndex;
-                }
-            }
         }
         // TODO: (HARP-3515)
         //      The rendering of a path label that contains just a single point that is not
@@ -35434,162 +36468,122 @@ class TextElementsRenderer {
         //      Fix: Skip/clip the invisible points at beginning and end of the path to get
         //      the visible part of the path.
         // If not a single point is visible, skip the path
-        if (indexOfFirstVisibleScreenPoint === -1) {
-            return undefined;
+        if (!anyPointVisible) {
+            return false;
         }
         // Check/guess if the screen box can hold a string of that length. It is important
         // to guess that value without measuring the font first to save time.
         const minScreenSpace = textElement.text.length * MIN_AVERAGE_CHAR_WIDTH;
-        if ((maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY) <
-            minScreenSpace * minScreenSpace) {
+        tempBox.setFromPoints(screenPoints);
+        const boxDiagonalSq = tempBox.max.sub(tempBox.min).lengthSq();
+        if (boxDiagonalSq < minScreenSpace * minScreenSpace) {
             textElement.dbgPathTooSmall = true;
-            return undefined;
+            return false;
         }
-        return screenPoints;
+        return true;
     }
-    renderTileList(visibleTiles, time, frameNumber, zoomLevel, renderStartTime, renderedTextElements, secondChanceTextElements) {
-        if (this.m_textRenderers.length === 0 || visibleTiles.size === 0) {
-            return;
-        }
-        const consideredTextElements = new harp_utils_1.GroupedPriorityList();
-        for (const tile of visibleTiles.values()) {
-            consideredTextElements.merge(tile.placedTextElements);
-        }
-        const maxNumRenderedTextElements = this.m_maxNumVisibleLabels;
-        let numRenderedTextElements = 0;
-        for (const elementGroup of consideredTextElements.sortedGroups) {
-            const textElementsInGroup = elementGroup.elements;
-            this.sortTextElements(textElementsInGroup, this.m_mapView.viewRanges.maximum);
-            numRenderedTextElements += this.renderTextElements(textElementsInGroup, time, frameNumber, zoomLevel, renderedTextElements, secondChanceTextElements);
-            if (numRenderedTextElements > maxNumRenderedTextElements) {
-                break;
-            }
-            // renderStartTime is set if this.overloaded is true
-            if (renderStartTime !== undefined && OVERLOAD_RENDER_TIME_LIMIT > 0) {
-                const endTime = harp_utils_1.PerformanceTimer.now();
-                const elapsedTime = endTime - renderStartTime;
-                if (elapsedTime > OVERLOAD_RENDER_TIME_LIMIT) {
-                    return;
-                }
-            }
-        }
-    }
-    checkIfOverloaded() {
-        const renderList = this.m_mapView.visibleTileSet.dataSourceTileList;
+    checkIfOverloaded(dataSourceTileList) {
         // Count the number of TextElements in the scene to see if we have to switch to
         // "overloadMode".
         let numTextElementsInScene = 0;
-        renderList.forEach(renderListEntry => {
+        dataSourceTileList.forEach(renderListEntry => {
             for (const tile of renderListEntry.renderedTiles.values()) {
                 numTextElementsInScene += tile.textElementGroups.count();
-                numTextElementsInScene += tile.userTextElements.length;
+                numTextElementsInScene += tile.userTextElements.elements.length;
             }
         });
-        this.m_overloaded = numTextElementsInScene > OVERLOAD_LABEL_LIMIT;
+        const newOverloaded = numTextElementsInScene > OVERLOAD_LABEL_LIMIT;
+        if (newOverloaded && !this.m_overloaded) {
+            logger.debug("Overloaded Mode enabled.");
+        }
+        this.m_overloaded = newOverloaded;
         return this.m_overloaded;
-    }
-    checkStartFadeIn(renderState, frameNumber, time, forceFadeIn = false) {
-        let fadeAnimationStarted = false;
-        if (renderState !== undefined) {
-            // Fade-in after skipping rendering during movement
-            if (forceFadeIn ||
-                renderState.state === RenderState_1.FadingState.Undefined ||
-                renderState.lastFrameNumber < frameNumber - 1) {
-                this.startFadeIn(renderState, frameNumber, time);
-            }
-            if (renderState.isFading()) {
-                this.updateFading(renderState, time);
-                fadeAnimationStarted = true;
-            }
-            renderState.lastFrameNumber = frameNumber;
-        }
-        return fadeAnimationStarted;
-    }
-    checkStartFadeOut(renderState, frameNumber, time, forceFadeOut = true) {
-        let fadeAnimationStarted = false;
-        if (renderState !== undefined) {
-            // Fade-in after skipping rendering during movement
-            if (forceFadeOut ||
-                renderState.state === RenderState_1.FadingState.Undefined ||
-                renderState.lastFrameNumber < frameNumber - 1) {
-                this.startFadeOut(renderState, frameNumber, time);
-            }
-            if (renderState.isFading()) {
-                this.updateFading(renderState, time);
-                fadeAnimationStarted = true;
-            }
-            renderState.lastFrameNumber = frameNumber;
-        }
-        return fadeAnimationStarted;
-    }
-    startFadeIn(renderState, frameNumber, time) {
-        if (renderState.lastFrameNumber < frameNumber - 1) {
-            renderState.reset();
-        }
-        if (renderState.state === RenderState_1.FadingState.FadingIn ||
-            renderState.state === RenderState_1.FadingState.FadedIn) {
-            return;
-        }
-        if (renderState.state === RenderState_1.FadingState.FadingOut) {
-            // The fadeout is not complete: compute the virtual fadingStartTime in the past, to get
-            // a correct end time:
-            renderState.value = 1.0 - renderState.value;
-            renderState.startTime = time - renderState.value * renderState.fadingTime;
-        }
-        else {
-            renderState.startTime = time;
-            renderState.value = 0.0;
-            renderState.opacity = 0;
-        }
-        renderState.state = RenderState_1.FadingState.FadingIn;
-    }
-    startFadeOut(renderState, frameNumber, time) {
-        if (renderState.lastFrameNumber < frameNumber - 1) {
-            renderState.reset();
-        }
-        if (renderState.state === RenderState_1.FadingState.FadingOut ||
-            renderState.state === RenderState_1.FadingState.FadedOut) {
-            return;
-        }
-        if (renderState.state === RenderState_1.FadingState.FadingIn) {
-            // The fade-in is not complete: compute the virtual fadingStartTime in the past, to get
-            // a correct end time:
-            renderState.startTime = time - renderState.value * renderState.fadingTime;
-            renderState.value = 1.0 - renderState.value;
-        }
-        else {
-            renderState.startTime = time;
-            renderState.value = 0.0;
-            renderState.opacity = 1;
-        }
-        renderState.state = RenderState_1.FadingState.FadingOut;
-    }
-    updateFading(renderState, time) {
-        if (renderState.state !== RenderState_1.FadingState.FadingIn &&
-            renderState.state !== RenderState_1.FadingState.FadingOut) {
-            return;
-        }
-        if (renderState.startTime === 0) {
-            renderState.startTime = time;
-        }
-        const fadingTime = time - renderState.startTime;
-        const startValue = renderState.state === RenderState_1.FadingState.FadingIn ? 0 : 1;
-        const endValue = renderState.state === RenderState_1.FadingState.FadingIn ? 1 : 0;
-        if (fadingTime >= renderState.fadingTime) {
-            renderState.value = 1.0;
-            renderState.opacity = endValue;
-            renderState.state =
-                renderState.state === RenderState_1.FadingState.FadingIn
-                    ? RenderState_1.FadingState.FadedIn
-                    : RenderState_1.FadingState.FadedOut;
-        }
-        else {
-            renderState.value = fadingTime / renderState.fadingTime;
-            renderState.opacity = THREE.Math.clamp(harp_utils_1.MathUtils.smootherStep(startValue, endValue, renderState.value), 0, 1);
-        }
     }
 }
 exports.TextElementsRenderer = TextElementsRenderer;
+
+
+/***/ }),
+
+/***/ "../harp-mapview/lib/text/TextElementsRendererOptions.ts":
+/*!***************************************************************!*\
+  !*** ../harp-mapview/lib/text/TextElementsRendererOptions.ts ***!
+  \***************************************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const DEFAULT_FONT_CATALOG = "./resources/fonts/Default_FontCatalog.json";
+/**
+ * Default number of labels/POIs rendered in the scene
+ */
+const DEFAULT_MAX_NUM_RENDERED_TEXT_ELEMENTS = 500;
+/**
+ * Number of elements that are put into second queue. This second chance queue is used to render
+ * TextElements that have not been on screen before. This is a quick source for elements that can
+ * appear when the camera moves a bit, before new elements are placed.
+ */
+const DEFAULT_MAX_NUM_SECOND_CHANCE_ELEMENTS = 300;
+/**
+ * Maximum distance for text labels expressed as a ratio of distance to from the camera (0) to the
+ * far plane (1.0). May be synchronized with fog value ?
+ */
+const DEFAULT_MAX_DISTANCE_RATIO_FOR_LABELS = 0.99;
+/**
+ * Minimum scaling factor that may be applied to labels when their are distant from focus point.
+ */
+const DEFAULT_LABEL_DISTANCE_SCALE_MIN = 0.7;
+/**
+ * Maximum scaling factor that may be applied to labels due to their distance from focus point.
+ */
+const DEFAULT_LABEL_DISTANCE_SCALE_MAX = 1.5;
+const MIN_GLYPH_COUNT = 1024;
+const MAX_GLYPH_COUNT = 32768;
+/**
+ * Initializes undefined text renderer options to default values.
+ * @param options The options to be initialized.
+ */
+function initializeDefaultOptions(options) {
+    if (options.fontCatalog === undefined) {
+        options.fontCatalog = DEFAULT_FONT_CATALOG;
+    }
+    if (options.minNumGlyphs === undefined) {
+        options.minNumGlyphs = MIN_GLYPH_COUNT;
+    }
+    if (options.maxNumGlyphs === undefined) {
+        options.maxNumGlyphs = MAX_GLYPH_COUNT;
+    }
+    if (options.maxNumVisibleLabels === undefined) {
+        options.maxNumVisibleLabels = DEFAULT_MAX_NUM_RENDERED_TEXT_ELEMENTS;
+    }
+    // TODO: Unused so far.
+    if (options.numSecondChanceLabels === undefined) {
+        options.numSecondChanceLabels = DEFAULT_MAX_NUM_SECOND_CHANCE_ELEMENTS;
+    }
+    if (options.labelDistanceScaleMin === undefined) {
+        options.labelDistanceScaleMin = DEFAULT_LABEL_DISTANCE_SCALE_MIN;
+    }
+    if (options.labelDistanceScaleMax === undefined) {
+        options.labelDistanceScaleMax = DEFAULT_LABEL_DISTANCE_SCALE_MAX;
+    }
+    if (options.maxDistanceRatioForTextLabels === undefined) {
+        options.maxDistanceRatioForTextLabels = DEFAULT_MAX_DISTANCE_RATIO_FOR_LABELS;
+    }
+    if (options.maxDistanceRatioForPoiLabels === undefined) {
+        options.maxDistanceRatioForPoiLabels = DEFAULT_MAX_DISTANCE_RATIO_FOR_LABELS;
+    }
+    if (options.disableFading === undefined) {
+        options.disableFading = false;
+    }
+}
+exports.initializeDefaultOptions = initializeDefaultOptions;
 
 
 /***/ }),
@@ -35609,8 +36603,11 @@ exports.TextElementsRenderer = TextElementsRenderer;
  * SPDX-License-Identifier: Apache-2.0
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+const harp_datasource_protocol_1 = __webpack_require__(/*! @here/harp-datasource-protocol */ "../harp-datasource-protocol/index.ts");
 const harp_text_canvas_1 = __webpack_require__(/*! @here/harp-text-canvas */ "../harp-text-canvas/index.ts");
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
 const ColorCache_1 = __webpack_require__(/*! ../ColorCache */ "../harp-mapview/lib/ColorCache.ts");
+const logger = harp_utils_1.LoggerManager.instance.create("TextStyleCache");
 /**
  * [[TextStyle]] id for the default value inside a [[TextRenderStyleCache]] or a
  * [[TextLayoutStyleCache]].
@@ -35700,6 +36697,318 @@ class TextLayoutStyleCache {
     }
 }
 exports.TextLayoutStyleCache = TextLayoutStyleCache;
+exports.DEFAULT_FONT_CATALOG_NAME = "default";
+const DEFAULT_STYLE_NAME = "default";
+class TextStyleCache {
+    constructor(m_theme) {
+        this.m_theme = m_theme;
+        this.m_textRenderStyleCache = new TextRenderStyleCache();
+        this.m_textLayoutStyleCache = new TextLayoutStyleCache();
+        /**
+         * Cache for named colors.
+         */
+        this.m_colorMap = new Map();
+        this.m_textStyles = new Map();
+        this.m_defaultStyle = {
+            name: DEFAULT_STYLE_NAME,
+            fontCatalog: exports.DEFAULT_FONT_CATALOG_NAME,
+            renderParams: this.m_textRenderStyleCache.get(exports.DEFAULT_TEXT_STYLE_CACHE_ID).params,
+            layoutParams: this.m_textLayoutStyleCache.get(exports.DEFAULT_TEXT_STYLE_CACHE_ID).params
+        };
+    }
+    initializeDefaultTextElementStyle(defaultFontCatalogName) {
+        if (this.m_theme.textStyles === undefined) {
+            this.m_theme.textStyles = [];
+        }
+        const styles = this.m_theme.textStyles;
+        const themedDefaultStyle = styles.find(style => style.name === DEFAULT_STYLE_NAME);
+        if (themedDefaultStyle !== undefined) {
+            this.m_defaultStyle = this.createTextElementStyle(themedDefaultStyle, DEFAULT_STYLE_NAME);
+        }
+        else if (this.m_theme.defaultTextStyle !== undefined) {
+            this.m_defaultStyle = this.createTextElementStyle(this.m_theme.defaultTextStyle, DEFAULT_STYLE_NAME);
+        }
+        else if (styles.length > 0) {
+            this.m_defaultStyle = this.createTextElementStyle(styles[0], DEFAULT_STYLE_NAME);
+        }
+        this.m_defaultStyle.fontCatalog = defaultFontCatalogName;
+    }
+    initializeTextElementStyles(defaultPoiRenderer, defaultTextCanvas, textRenderers) {
+        // Initialize default text style.
+        if (this.m_defaultStyle.fontCatalog !== undefined) {
+            const styledTextRenderer = textRenderers.find(textRenderer => textRenderer.fontCatalog === this.m_defaultStyle.fontCatalog);
+            this.m_defaultStyle.textCanvas =
+                styledTextRenderer !== undefined ? styledTextRenderer.textCanvas : undefined;
+            this.m_defaultStyle.poiRenderer =
+                styledTextRenderer !== undefined ? styledTextRenderer.poiRenderer : undefined;
+        }
+        if (this.m_defaultStyle.textCanvas === undefined) {
+            if (this.m_defaultStyle.fontCatalog !== undefined) {
+                logger.warn(`FontCatalog '${this.m_defaultStyle.fontCatalog}' set in TextStyle '${this.m_defaultStyle.name}' not found, using default fontCatalog(${defaultTextCanvas.fontCatalog.name}).`);
+            }
+            this.m_defaultStyle.textCanvas = defaultTextCanvas;
+            this.m_defaultStyle.poiRenderer = defaultPoiRenderer;
+        }
+        // Initialize theme text styles.
+        this.m_theme.textStyles.forEach(element => {
+            this.m_textStyles.set(element.name, this.createTextElementStyle(element, element.name));
+        });
+        // tslint:disable-next-line:no-unused-variable
+        for (const [, style] of this.m_textStyles) {
+            if (style.textCanvas === undefined) {
+                if (style.fontCatalog !== undefined) {
+                    const styledTextRenderer = textRenderers.find(textRenderer => textRenderer.fontCatalog === style.fontCatalog);
+                    style.textCanvas =
+                        styledTextRenderer !== undefined
+                            ? styledTextRenderer.textCanvas
+                            : undefined;
+                    style.poiRenderer =
+                        styledTextRenderer !== undefined
+                            ? styledTextRenderer.poiRenderer
+                            : undefined;
+                }
+                if (style.textCanvas === undefined) {
+                    if (style.fontCatalog !== undefined) {
+                        logger.warn(`FontCatalog '${style.fontCatalog}' set in TextStyle '${style.name}' not found, using default fontCatalog(${defaultTextCanvas.fontCatalog.name}).`);
+                    }
+                    style.textCanvas = defaultTextCanvas;
+                    style.poiRenderer = defaultPoiRenderer;
+                }
+            }
+        }
+    }
+    /**
+     * Retrieves a [[TextElementStyle]] for [[Theme]]'s [[TextStyle]] id.
+     */
+    getTextElementStyle(styleId) {
+        let result;
+        if (styleId === undefined) {
+            result = this.m_defaultStyle;
+        }
+        else {
+            result = this.m_textStyles.get(styleId);
+            if (result === undefined) {
+                result = this.m_defaultStyle;
+            }
+        }
+        return result;
+    }
+    /**
+     * Gets the appropriate [[TextRenderStyle]] to use for a label. Depends heavily on the label's
+     * [[Technique]] and the current zoomLevel.
+     *
+     * @param technique Label's technique.
+     * @param techniqueIdx Label's technique index.
+     */
+    getRenderStyle(tile, technique) {
+        const mapView = tile.mapView;
+        const dataSource = tile.dataSource;
+        const zoomLevel = mapView.zoomLevel;
+        const cacheId = computeStyleCacheId(dataSource.name, technique, Math.floor(zoomLevel));
+        let renderStyle = this.m_textRenderStyleCache.get(cacheId);
+        if (renderStyle === undefined) {
+            const defaultRenderParams = this.m_defaultStyle.renderParams;
+            if (technique.color !== undefined) {
+                const hexColor = harp_datasource_protocol_1.getPropertyValue(technique.color, Math.floor(zoomLevel));
+                this.m_colorMap.set(cacheId, ColorCache_1.ColorCache.instance.getColor(hexColor));
+            }
+            if (technique.backgroundColor !== undefined) {
+                const hexBgColor = harp_datasource_protocol_1.getPropertyValue(technique.backgroundColor, Math.floor(zoomLevel));
+                this.m_colorMap.set(cacheId + "_bg", ColorCache_1.ColorCache.instance.getColor(hexBgColor));
+            }
+            const renderParams = {
+                fontName: harp_utils_1.getOptionValue(technique.fontName, defaultRenderParams.fontName),
+                fontSize: {
+                    unit: harp_text_canvas_1.FontUnit.Pixel,
+                    size: technique.size !== undefined
+                        ? harp_datasource_protocol_1.getPropertyValue(technique.size, Math.floor(zoomLevel))
+                        : defaultRenderParams.fontSize.size,
+                    backgroundSize: technique.backgroundSize !== undefined
+                        ? harp_datasource_protocol_1.getPropertyValue(technique.backgroundSize, Math.floor(zoomLevel))
+                        : defaultRenderParams.fontSize.backgroundSize
+                },
+                fontStyle: technique.fontStyle === "Regular" ||
+                    technique.fontStyle === "Bold" ||
+                    technique.fontStyle === "Italic" ||
+                    technique.fontStyle === "BoldItalic"
+                    ? harp_text_canvas_1.FontStyle[technique.fontStyle]
+                    : defaultRenderParams.fontStyle,
+                fontVariant: technique.fontVariant === "Regular" ||
+                    technique.fontVariant === "AllCaps" ||
+                    technique.fontVariant === "SmallCaps"
+                    ? harp_text_canvas_1.FontVariant[technique.fontVariant]
+                    : defaultRenderParams.fontVariant,
+                rotation: harp_utils_1.getOptionValue(technique.rotation, defaultRenderParams.rotation),
+                color: harp_utils_1.getOptionValue(this.m_colorMap.get(cacheId), defaultRenderParams.color),
+                backgroundColor: harp_utils_1.getOptionValue(this.m_colorMap.get(cacheId + "_bg"), defaultRenderParams.backgroundColor),
+                opacity: technique.opacity !== undefined
+                    ? harp_datasource_protocol_1.getPropertyValue(technique.opacity, Math.floor(zoomLevel))
+                    : defaultRenderParams.opacity,
+                backgroundOpacity: technique.backgroundOpacity !== undefined
+                    ? harp_datasource_protocol_1.getPropertyValue(technique.backgroundOpacity, Math.floor(zoomLevel))
+                    : technique.backgroundColor !== undefined &&
+                        technique.backgroundSize !== undefined &&
+                        harp_datasource_protocol_1.getPropertyValue(technique.backgroundSize, Math.floor(zoomLevel)) > 0
+                        ? 1.0 // make label opaque when backgroundColor and backgroundSize are set
+                        : defaultRenderParams.backgroundOpacity
+            };
+            const themeRenderParams = this.getTextElementStyle(technique.style).renderParams;
+            renderStyle = new harp_text_canvas_1.TextRenderStyle(Object.assign(Object.assign({}, themeRenderParams), renderParams));
+            this.m_textRenderStyleCache.set(cacheId, renderStyle);
+        }
+        return renderStyle;
+    }
+    /**
+     * Gets the appropriate [[TextRenderStyle]] to use for a label. Depends heavily on the label's
+     * [[Technique]] and the current zoomLevel.
+     *
+     * @param tile The [[Tile]] to process.
+     * @param technique Label's technique.
+     */
+    getLayoutStyle(tile, technique) {
+        const floorZoomLevel = Math.floor(tile.mapView.zoomLevel);
+        const cacheId = computeStyleCacheId(tile.dataSource.name, technique, floorZoomLevel);
+        let layoutStyle = this.m_textLayoutStyleCache.get(cacheId);
+        if (layoutStyle === undefined) {
+            const defaultLayoutParams = this.m_defaultStyle.layoutParams;
+            const hAlignment = harp_datasource_protocol_1.getPropertyValue(technique.hAlignment, floorZoomLevel);
+            const vAlignment = harp_datasource_protocol_1.getPropertyValue(technique.vAlignment, floorZoomLevel);
+            const horizontalAlignment = hAlignment === "Left" || hAlignment === "Center" || hAlignment === "Right"
+                ? harp_text_canvas_1.HorizontalAlignment[hAlignment]
+                : defaultLayoutParams.horizontalAlignment;
+            const verticalAlignment = vAlignment === "Above" || vAlignment === "Center" || vAlignment === "Below"
+                ? harp_text_canvas_1.VerticalAlignment[vAlignment]
+                : defaultLayoutParams.verticalAlignment;
+            const layoutParams = {
+                tracking: harp_utils_1.getOptionValue(technique.tracking, defaultLayoutParams.tracking),
+                leading: harp_utils_1.getOptionValue(technique.leading, defaultLayoutParams.leading),
+                maxLines: harp_utils_1.getOptionValue(technique.maxLines, defaultLayoutParams.maxLines),
+                lineWidth: harp_utils_1.getOptionValue(technique.lineWidth, defaultLayoutParams.lineWidth),
+                canvasRotation: harp_utils_1.getOptionValue(technique.canvasRotation, defaultLayoutParams.canvasRotation),
+                lineRotation: harp_utils_1.getOptionValue(technique.lineRotation, defaultLayoutParams.lineRotation),
+                wrappingMode: technique.wrappingMode === "None" ||
+                    technique.wrappingMode === "Character" ||
+                    technique.wrappingMode === "Word"
+                    ? harp_text_canvas_1.WrappingMode[technique.wrappingMode]
+                    : defaultLayoutParams.wrappingMode,
+                horizontalAlignment,
+                verticalAlignment
+            };
+            const themeLayoutParams = this.getTextElementStyle(technique.style);
+            layoutStyle = new harp_text_canvas_1.TextLayoutStyle(Object.assign(Object.assign({}, themeLayoutParams), layoutParams));
+            this.m_textLayoutStyleCache.set(cacheId, layoutStyle);
+        }
+        return layoutStyle;
+    }
+    createTextElementStyle(style, styleName) {
+        return {
+            name: styleName,
+            fontCatalog: harp_utils_1.getOptionValue(style.fontCatalogName, this.m_defaultStyle.fontCatalog),
+            renderParams: {
+                fontName: style.fontName,
+                fontSize: {
+                    unit: harp_text_canvas_1.FontUnit.Pixel,
+                    size: 32,
+                    backgroundSize: style.backgroundSize || 8
+                },
+                fontStyle: style.fontStyle === "Regular" ||
+                    style.fontStyle === "Bold" ||
+                    style.fontStyle === "Italic" ||
+                    style.fontStyle === "BoldItalic"
+                    ? harp_text_canvas_1.FontStyle[style.fontStyle]
+                    : undefined,
+                fontVariant: style.fontVariant === "Regular" ||
+                    style.fontVariant === "AllCaps" ||
+                    style.fontVariant === "SmallCaps"
+                    ? harp_text_canvas_1.FontVariant[style.fontVariant]
+                    : undefined,
+                rotation: style.rotation,
+                color: style.color !== undefined
+                    ? ColorCache_1.ColorCache.instance.getColor(style.color)
+                    : undefined,
+                backgroundColor: style.backgroundColor !== undefined
+                    ? ColorCache_1.ColorCache.instance.getColor(style.backgroundColor)
+                    : undefined,
+                opacity: style.opacity,
+                backgroundOpacity: style.backgroundOpacity
+            },
+            layoutParams: {
+                tracking: style.tracking,
+                leading: style.leading,
+                maxLines: style.maxLines,
+                lineWidth: style.lineWidth,
+                canvasRotation: style.canvasRotation,
+                lineRotation: style.lineRotation,
+                wrappingMode: style.wrappingMode === "None" ||
+                    style.wrappingMode === "Character" ||
+                    style.wrappingMode === "Word"
+                    ? harp_text_canvas_1.WrappingMode[style.wrappingMode]
+                    : harp_text_canvas_1.WrappingMode.Word,
+                verticalAlignment: style.vAlignment === "Above" ||
+                    style.vAlignment === "Center" ||
+                    style.vAlignment === "Below"
+                    ? harp_text_canvas_1.VerticalAlignment[style.vAlignment]
+                    : harp_text_canvas_1.VerticalAlignment.Center,
+                horizontalAlignment: style.hAlignment === "Left" ||
+                    style.hAlignment === "Center" ||
+                    style.hAlignment === "Right"
+                    ? harp_text_canvas_1.HorizontalAlignment[style.hAlignment]
+                    : harp_text_canvas_1.HorizontalAlignment.Center
+            }
+        };
+    }
+}
+exports.TextStyleCache = TextStyleCache;
+
+
+/***/ }),
+
+/***/ "../harp-mapview/lib/text/UpdateStats.ts":
+/*!***********************************************!*\
+  !*** ../harp-mapview/lib/text/UpdateStats.ts ***!
+  \***********************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const Placement_1 = __webpack_require__(/*! ./Placement */ "../harp-mapview/lib/text/Placement.ts");
+class UpdateStats {
+    constructor(m_logger) {
+        this.m_logger = m_logger;
+        this.tiles = 0;
+        this.totalGroups = 0;
+        this.newGroups = 0;
+        this.totalLabels = 0;
+        this.results = new Array(Placement_1.PrePlacementResult.Count);
+        this.results.fill(0);
+    }
+    clear() {
+        this.tiles = 0;
+        this.totalGroups = 0;
+        this.newGroups = 0;
+        this.totalLabels = 0;
+        this.results.fill(0);
+    }
+    log() {
+        this.m_logger.debug("Tiles", this.tiles);
+        this.m_logger.debug("Total groups", this.totalGroups);
+        this.m_logger.debug("New groups", this.newGroups);
+        this.m_logger.debug("Total labels", this.totalLabels);
+        this.m_logger.debug("Placed labels", this.results[Placement_1.PrePlacementResult.Ok]);
+        this.m_logger.debug("Invisible", this.results[Placement_1.PrePlacementResult.Invisible]);
+        this.m_logger.debug("Poi not ready", this.results[Placement_1.PrePlacementResult.NotReady]);
+        this.m_logger.debug("Too far", this.results[Placement_1.PrePlacementResult.TooFar]);
+        this.m_logger.debug("Duplicate", this.results[Placement_1.PrePlacementResult.Duplicate]);
+    }
+}
+exports.UpdateStats = UpdateStats;
 
 
 /***/ }),
@@ -36000,7 +37309,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 __export(__webpack_require__(/*! ./lib/CopyMaterial */ "../harp-materials/lib/CopyMaterial.ts"));
 __export(__webpack_require__(/*! ./lib/SepiaShader */ "../harp-materials/lib/SepiaShader.ts"));
 __export(__webpack_require__(/*! ./lib/VignetteShader */ "../harp-materials/lib/VignetteShader.ts"));
-__export(__webpack_require__(/*! ./lib/DashedLineMaterial */ "../harp-materials/lib/DashedLineMaterial.ts"));
 __export(__webpack_require__(/*! ./lib/EdgeMaterial */ "../harp-materials/lib/EdgeMaterial.ts"));
 __export(__webpack_require__(/*! ./lib/MapMeshMaterials */ "../harp-materials/lib/MapMeshMaterials.ts"));
 __export(__webpack_require__(/*! ./lib/HighPrecisionLineMaterial */ "../harp-materials/lib/HighPrecisionLineMaterial.ts"));
@@ -36181,124 +37489,6 @@ class CopyMaterial extends THREE.ShaderMaterial {
     }
 }
 exports.CopyMaterial = CopyMaterial;
-
-
-/***/ }),
-
-/***/ "../harp-materials/lib/DashedLineMaterial.ts":
-/*!***************************************************!*\
-  !*** ../harp-materials/lib/DashedLineMaterial.ts ***!
-  \***************************************************/
-/*! no static exports found */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-/*
- * Copyright (C) 2017-2019 HERE Europe B.V.
- * Licensed under Apache 2.0, see full license in LICENSE
- * SPDX-License-Identifier: Apache-2.0
- */
-Object.defineProperty(exports, "__esModule", { value: true });
-const THREE = __webpack_require__(/*! three */ "three");
-const SolidLineMaterial_1 = __webpack_require__(/*! ./SolidLineMaterial */ "../harp-materials/lib/SolidLineMaterial.ts");
-/**
- * Material designed to render dashed variable-width lines.
- */
-class DashedLineMaterial extends SolidLineMaterial_1.SolidLineMaterial {
-    /**
-     * Constructs a new `DashedLineMaterial`.
-     *
-     * @param params `DashedLineMaterial` parameters.
-     */
-    constructor(params) {
-        const shaderParams = {};
-        if (params !== undefined && params.color !== undefined) {
-            shaderParams.color = params.color;
-        }
-        if (params !== undefined && params.outlineColor !== undefined) {
-            shaderParams.outlineColor = params.outlineColor;
-        }
-        if (params !== undefined && params.lineWidth !== undefined) {
-            shaderParams.lineWidth = params.lineWidth;
-        }
-        if (params !== undefined && params.outlineWidth !== undefined) {
-            shaderParams.outlineWidth = params.outlineWidth;
-        }
-        if (params !== undefined && params.opacity !== undefined) {
-            shaderParams.opacity = params.opacity;
-        }
-        if (params !== undefined && params.fog !== undefined) {
-            shaderParams.fog = params.fog;
-        }
-        super(shaderParams);
-        this.name = "DashedLineMaterial";
-        Object.assign(this.uniforms, {
-            dashSize: new THREE.Uniform(DashedLineMaterial.DEFAULT_DASH_SIZE),
-            gapSize: new THREE.Uniform(DashedLineMaterial.DEFAULT_GAP_SIZE)
-        });
-        // Apply initial parameter values.
-        if (params !== undefined) {
-            if (params.dashSize !== undefined) {
-                this.dashSize = params.dashSize;
-            }
-            if (params.gapSize !== undefined) {
-                this.gapSize = params.gapSize;
-            }
-            if (params.fog !== undefined) {
-                this.fog = params.fog !== null;
-            }
-            if (params.dashColor === undefined) {
-                this.dashTransparency = true;
-            }
-            else {
-                this.dashColor.set(params.dashColor);
-                this.dashColor = this.dashColor; // Trigger setter
-            }
-        }
-    }
-    /**
-     * Dashes color.
-     */
-    get dashColor() {
-        return this.uniforms.dashColor.value;
-    }
-    set dashColor(value) {
-        this.uniforms.dashColor.value = value;
-        this.dashTransparency = false;
-    }
-    get dashTransparency() {
-        return !this.defines.USE_DASH_COLOR;
-    }
-    set dashTransparency(value) {
-        this.defines.USE_DASH_COLOR = value ? 0 : 1;
-    }
-    /**
-     * Size of the dashed segments.
-     */
-    get dashSize() {
-        return this.uniforms.dashSize.value;
-    }
-    set dashSize(value) {
-        this.uniforms.dashSize.value = value;
-    }
-    /**
-     * Size of the gaps between dashed segments.
-     */
-    get gapSize() {
-        return this.uniforms.gapSize.value;
-    }
-    set gapSize(value) {
-        this.uniforms.gapSize.value = value;
-        this.updateDashedFeature();
-    }
-    updateDashedFeature() {
-        this.defines.DASHED_LINE = this.gapSize > 0.0 ? 1 : 0;
-    }
-}
-exports.DashedLineMaterial = DashedLineMaterial;
-DashedLineMaterial.DEFAULT_DASH_SIZE = 1.0;
-DashedLineMaterial.DEFAULT_GAP_SIZE = 1.0;
 
 
 /***/ }),
@@ -37744,7 +38934,7 @@ uniform float extrusionRatio;
 varying vec4 vExtrusionAxis;
 `,
     extrusion_vertex: `
-transformed = transformed - extrusionAxis.xyz + extrusionAxis.xyz * extrusionRatio;
+transformed = transformed + extrusionAxis.xyz * (extrusionRatio - 1.0);
 vExtrusionAxis = vec4(normalMatrix * extrusionAxis.xyz, extrusionAxis.w);
 `,
     // Modified version of THREE <normal_fragment_begin> shader chunk which, for flat shaded
@@ -37898,22 +39088,22 @@ float roundEdgesAndAddCaps(in vec4 coords, in vec3 range) {
     dist = max(dist, segmentBeginMask * length(vec2((coords.x - coords.z) / widthRatio, coords.y)));
     dist = max(dist, segmentEndMask * length(vec2((coords.x - coords.w) / widthRatio, coords.y)));
 
-    #if !defined(CAPS_ROUND)
+    #if !CAPS_ROUND
     // Compute the caps mask.
-    float capRangeMask = clamp(1.0 - ceil(range.z - 1.0), 0.0, 1.0);
-    float beginCapMask = clamp(ceil(0.0 - coords.x), 0.0, 1.0);
-    float endCapMask = clamp(ceil(coords.x - 1.0), 0.0, 1.0);
+    float capRangeMask = clamp(1.0 - ceil(range.z - drawRange.y), 0.0, 1.0);
+    float beginCapMask = clamp(ceil(drawRange.x - coords.x), 0.0, 1.0);
+    float endCapMask = clamp(ceil(coords.x - drawRange.y), 0.0, 1.0);
     float capMask = capRangeMask * max(beginCapMask, endCapMask);
 
     // Compute the outer segment distance (specific for each cap mode).
-    float capDist = max(coords.x - 1.0, -coords.x) / widthRatio;
-    #if defined(CAPS_NONE)
+    float capDist = max(coords.x - drawRange.y, drawRange.x - coords.x) / widthRatio;
+    #if CAPS_NONE
     dist = mix(dist, max(abs(coords.y), (capDist + 0.1) / 0.1), capMask);
-    #elif defined(CAPS_SQUARE)
+    #elif CAPS_SQUARE
     dist = mix(dist, max(abs(coords.y), capDist), capMask);
-    #elif defined(CAPS_TRIANGLE_OUT)
+    #elif CAPS_TRIANGLE_OUT
     dist = mix(dist, abs(coords.y) + capDist, capMask);
-    #elif defined(CAPS_TRIANGLE_IN)
+    #elif CAPS_TRIANGLE_IN
     dist = mix(dist, max(abs(coords.y), (capDist - abs(coords.y)) + capDist), capMask);
     #endif
     #endif
@@ -37993,6 +39183,7 @@ uniform mat4 modelViewMatrix;
 uniform mat4 projectionMatrix;
 uniform float lineWidth;
 uniform float outlineWidth;
+uniform vec2 drawRange;
 
 #ifdef USE_DISPLACEMENTMAP
 uniform sampler2D displacementMap;
@@ -38015,11 +39206,12 @@ varying vec3 vColor;
 #include <extrude_line_vert_func>
 
 void main() {
+    // Calculate the segment.
+    vec2 segment = abs(extrusionCoord.xy) - SEGMENT_OFFSET;
+    float segmentPos = sign(extrusionCoord.x) / 2.0 + 0.5;
+
     // Calculate the vertex position inside the line (segment) and extrusion direction and factor.
-    float linePos = mix(
-        abs(extrusionCoord.x) - SEGMENT_OFFSET,
-        abs(extrusionCoord.y) - SEGMENT_OFFSET,
-        sign(extrusionCoord.x) / 2.0 + 0.5);
+    float linePos = mix(segment.x, segment.y, segmentPos);
     vec2 extrusionDir = sign(extrusionCoord.xy);
     float extrusionFactor = extrusionDir.y * tan(bitangent.w / 2.0);
 
@@ -38029,7 +39221,19 @@ void main() {
 
     // Store the normalized extrusion coordinates in vCoords (with their ranges in vRange).
     vRange = vec3(extrusionCoord.z, lineWidth, extrusionFactor);
-    vCoords = vec4(extrusionDir / vRange.xy, (abs(extrusionCoord.xy) - SEGMENT_OFFSET) / vRange.x);
+    vCoords = vec4(extrusionDir / vRange.xy, segment / vRange.x);
+
+    // Adjust the segment to fit the drawRange.
+    float capDist = (lineWidth + outlineWidth) / extrusionCoord.z;
+    if ((vCoords.w + capDist) < drawRange.x || (vCoords.z - capDist) > drawRange.y) {
+        vCoords.zw += 1.0;
+    }
+    if (vCoords.z < drawRange.x) {
+        vCoords.zw += vec2(drawRange.x - vCoords.z, 0.0);
+    }
+    if (vCoords.w > drawRange.y) {
+        vCoords.zw -= vec2(0.0, vCoords.w - drawRange.y);
+    }
 
     // Transform position.
     #ifdef USE_DISPLACEMENTMAP
@@ -38062,6 +39266,7 @@ uniform float opacity;
 uniform float lineWidth;
 uniform float outlineWidth;
 uniform vec2 tileSize;
+uniform vec2 drawRange;
 
 #if DASHED_LINE
 uniform float dashSize;
@@ -38179,7 +39384,12 @@ class SolidLineMaterial extends THREE.RawShaderMaterial {
             DASHED_LINE: 0,
             TILE_CLIP: 0,
             USE_COLOR: 0,
-            USE_DASH_COLOR: 0
+            USE_DASH_COLOR: 0,
+            CAPS_SQUARE: 0,
+            CAPS_ROUND: 1,
+            CAPS_NONE: 0,
+            CAPS_TRIANGLE_IN: 0,
+            CAPS_TRIANGLE_OUT: 0
         };
         const hasFog = params !== undefined && params.fog === true;
         if (hasFog) {
@@ -38207,7 +39417,10 @@ class SolidLineMaterial extends THREE.RawShaderMaterial {
                     tileSize: new THREE.Uniform(new THREE.Vector2()),
                     fadeNear: new THREE.Uniform(MapMeshMaterials_1.FadingFeature.DEFAULT_FADE_NEAR),
                     fadeFar: new THREE.Uniform(MapMeshMaterials_1.FadingFeature.DEFAULT_FADE_FAR),
-                    displacementMap: new THREE.Uniform(hasDisplacementMap ? params.displacementMap : new THREE.Texture())
+                    displacementMap: new THREE.Uniform(hasDisplacementMap ? params.displacementMap : new THREE.Texture()),
+                    drawRange: new THREE.Uniform(new THREE.Vector2(SolidLineMaterial.DEFAULT_DRAW_RANGE_START, SolidLineMaterial.DEFAULT_DRAW_RANGE_END)),
+                    dashSize: new THREE.Uniform(SolidLineMaterial.DEFAULT_DASH_SIZE),
+                    gapSize: new THREE.Uniform(SolidLineMaterial.DEFAULT_GAP_SIZE)
                 },
                 // We need the fog uniforms available when we use `updateFog` as the internal
                 // recompilation cannot add or remove uniforms.
@@ -38251,8 +39464,24 @@ class SolidLineMaterial extends THREE.RawShaderMaterial {
             if (params.displacementMap !== undefined) {
                 this.displacementMap = params.displacementMap;
             }
-            if (params.caps !== undefined && exports.LineCapsDefinitions.hasOwnProperty(params.caps)) {
-                defines[exports.LineCapsDefinitions[params.caps]] = 1;
+            if (params.caps !== undefined) {
+                this.caps = params.caps;
+            }
+            if (params.drawRangeStart !== undefined) {
+                this.drawRangeStart = params.drawRangeStart;
+            }
+            if (params.drawRangeEnd !== undefined) {
+                this.drawRangeEnd = params.drawRangeEnd;
+            }
+            if (params.dashColor !== undefined) {
+                this.dashColor.set(params.dashColor);
+                this.defines.USE_DASH_COLOR = 1.0;
+            }
+            if (params.dashSize !== undefined) {
+                this.dashSize = params.dashSize;
+            }
+            if (params.gapSize !== undefined) {
+                this.gapSize = params.gapSize;
             }
             this.fog = hasFog;
         }
@@ -38303,11 +39532,24 @@ class SolidLineMaterial extends THREE.RawShaderMaterial {
     set color(value) {
         this.uniforms.diffuse.value = value;
     }
+    /**
+     * Outline color.
+     */
     get outlineColor() {
         return this.uniforms.outlineColor.value;
     }
     set outlineColor(value) {
         this.uniforms.outlineColor.value = value;
+    }
+    /**
+     * Dash color.
+     */
+    get dashColor() {
+        return this.uniforms.dashColor.value;
+    }
+    set dashColor(value) {
+        this.uniforms.dashColor.value = value;
+        this.defines.USE_DASH_COLOR = 1.0;
     }
     /**
      * Line width.
@@ -38318,12 +39560,64 @@ class SolidLineMaterial extends THREE.RawShaderMaterial {
     set lineWidth(value) {
         this.uniforms.lineWidth.value = value;
     }
+    /**
+     * Outline width.
+     */
     get outlineWidth() {
         return this.uniforms.outlineWidth.value;
     }
     set outlineWidth(value) {
         this.uniforms.outlineWidth.value = value;
         this.updateOutline(value > 0);
+    }
+    /**
+     * Size of the dashed segments.
+     */
+    get dashSize() {
+        return this.uniforms.dashSize.value;
+    }
+    set dashSize(value) {
+        this.uniforms.dashSize.value = value;
+    }
+    /**
+     * Size of the gaps between dashed segments.
+     */
+    get gapSize() {
+        return this.uniforms.gapSize.value;
+    }
+    set gapSize(value) {
+        this.uniforms.gapSize.value = value;
+        this.defines.DASHED_LINE = this.gapSize > 0.0 ? 1 : 0;
+    }
+    /**
+     * Caps mode.
+     */
+    get caps() {
+        let result = "Round";
+        if (this.defines.CAPS_SQUARE === 1) {
+            result = "Square";
+        }
+        else if (this.defines.CAPS_NONE === 1) {
+            result = "None";
+        }
+        else if (this.defines.CAPS_ROUND === 1) {
+            result = "Round";
+        }
+        else if (this.defines.CAPS_TRIANGLE_IN === 1) {
+            result = "TriangleIn";
+        }
+        else if (this.defines.CAPS_TRIANGLE_OUT === 1) {
+            result = "TriangleOut";
+        }
+        return result;
+    }
+    set caps(value) {
+        this.defines.CAPS_SQUARE = 0;
+        this.defines.CAPS_ROUND = 0;
+        this.defines.CAPS_NONE = 0;
+        this.defines.CAPS_TRIANGLE_IN = 0;
+        this.defines.CAPS_TRIANGLE_OUT = 0;
+        this.defines[exports.LineCapsDefinitions[value]] = 1;
     }
     get fadeNear() {
         return this.uniforms.fadeNear.value;
@@ -38359,12 +39653,28 @@ class SolidLineMaterial extends THREE.RawShaderMaterial {
         }
         this.needsUpdate = true;
     }
+    get drawRangeStart() {
+        return this.uniforms.drawRange.value.x;
+    }
+    set drawRangeStart(value) {
+        this.uniforms.drawRange.value.x = value;
+    }
+    get drawRangeEnd() {
+        return this.uniforms.drawRange.value.y;
+    }
+    set drawRangeEnd(value) {
+        this.uniforms.drawRange.value.y = value;
+    }
 }
 exports.SolidLineMaterial = SolidLineMaterial;
 SolidLineMaterial.DEFAULT_COLOR = 0xff0000;
 SolidLineMaterial.DEFAULT_WIDTH = 1.0;
 SolidLineMaterial.DEFAULT_OUTLINE_WIDTH = 0.0;
 SolidLineMaterial.DEFAULT_OPACITY = 1.0;
+SolidLineMaterial.DEFAULT_DRAW_RANGE_START = 0.0;
+SolidLineMaterial.DEFAULT_DRAW_RANGE_END = 1.0;
+SolidLineMaterial.DEFAULT_DASH_SIZE = 1.0;
+SolidLineMaterial.DEFAULT_GAP_SIZE = 1.0;
 
 
 /***/ }),
@@ -38765,12 +40075,10 @@ class OmvGenericFeatureFilter {
     constructor(description) {
         this.description = description;
         if (this.description.kindsToProcess.length > 0) {
-            this.enabledKinds = new harp_datasource_protocol_1.GeometryKindSet(this.description
-                .kindsToProcess);
+            this.enabledKinds = new harp_datasource_protocol_1.GeometryKindSet(this.description.kindsToProcess);
         }
         if (this.description.kindsToIgnore.length > 0) {
-            this.disabledKinds = new harp_datasource_protocol_1.GeometryKindSet(this.description
-                .kindsToIgnore);
+            this.disabledKinds = new harp_datasource_protocol_1.GeometryKindSet(this.description.kindsToIgnore);
         }
     }
     static matchLayer(layer, layerItems, level) {
@@ -38977,11 +40285,12 @@ function getDataProvider(params) {
     if (params.dataProvider) {
         return params.dataProvider;
     }
-    else if (params.baseUrl) {
+    else if (params.baseUrl ||
+        params.url) {
         return new OmvRestClient_1.OmvRestClient(params);
     }
     else {
-        throw new Error("OmvDataSource: missing baseUrl or dataProvider params");
+        throw new Error("OmvDataSource: missing url, baseUrl or dataProvider params");
     }
 }
 let missingOmvDecoderServiceInfoEmitted = false;
@@ -39003,6 +40312,8 @@ class OmvDataSource extends harp_mapview_decoder_1.TileDataSource {
         });
         this.m_params = m_params;
         this.cacheable = true;
+        this.addGroundPlane =
+            m_params.addGroundPlane === undefined || m_params.addGroundPlane === true;
         this.m_decoderOptions = {
             showMissingTechniques: this.m_params.showMissingTechniques === true,
             filterDescription: this.m_params.filterDescr,
@@ -39014,6 +40325,7 @@ class OmvDataSource extends harp_mapview_decoder_1.TileDataSource {
             storageLevelOffset: harp_utils_1.getOptionValue(m_params.storageLevelOffset, -1),
             enableElevationOverlay: this.m_params.enableElevationOverlay === true
         };
+        this.maxGeometryHeight = harp_utils_1.getOptionValue(m_params.maxGeometryHeight, harp_geoutils_1.EarthConstants.MAX_BUILDING_HEIGHT);
     }
     async connect() {
         try {
@@ -39206,6 +40518,7 @@ class OmvDebugLabelsTile extends OmvTile_1.OmvTile {
             const blackPointPositions = new Array();
             let baseVertex = 0;
             const pointScale = this.mapView.pixelToWorld;
+            const worldOffsetX = this.computeWorldOffsetX();
             for (const textPath of this.preparedTextPaths) {
                 const technique = decodedTile.techniques[textPath.technique];
                 if (!harp_datasource_protocol_1.isTextTechnique(technique)) {
@@ -39250,7 +40563,7 @@ class OmvDebugLabelsTile extends OmvTile_1.OmvTile {
                                 const label = pathIndex % 5 === 0
                                     ? text + ":" + pathIndex
                                     : Number(pathIndex).toString();
-                                const labelElement = new harp_mapview_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(label), new THREE.Vector3(x, y, z), textRenderStyle, textLayoutStyle, harp_datasource_protocol_1.getPropertyValue(technique.priority || 0, zoomLevel), technique.xOffset || 0.0, technique.yOffset || 0.0);
+                                const labelElement = new harp_mapview_1.TextElement(harp_text_canvas_1.ContextualArabicConverter.instance.convert(label), new THREE.Vector3(x + worldOffsetX, y, z), textRenderStyle, textLayoutStyle, harp_datasource_protocol_1.getPropertyValue(technique.priority || 0, zoomLevel), technique.xOffset || 0.0, technique.yOffset || 0.0);
                                 labelElement.minZoomLevel = technique.minZoomLevel;
                                 labelElement.mayOverlap = true;
                                 labelElement.reserveSpace = false;
@@ -39274,7 +40587,7 @@ class OmvDebugLabelsTile extends OmvTile_1.OmvTile {
             }
             if (lineIndices.length > 0) {
                 lineGeometry.addGroup(0, lineIndices.length, 0);
-                lineGeometry.addAttribute("position", new THREE.BufferAttribute(new Float32Array(linePositions), 3));
+                lineGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(linePositions), 3));
                 lineGeometry.setIndex(new THREE.BufferAttribute(new Uint32Array(lineIndices), 1));
                 const lineMesh = new THREE.LineSegments(lineGeometry, debugMaterial);
                 lineMesh.renderOrder = 2000;
@@ -39282,7 +40595,7 @@ class OmvDebugLabelsTile extends OmvTile_1.OmvTile {
             }
             if (redPointIndices.length > 0) {
                 redPointGeometry.addGroup(0, redPointIndices.length, 0);
-                redPointGeometry.addAttribute("position", new THREE.BufferAttribute(new Float32Array(redPointPositions), 3));
+                redPointGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(redPointPositions), 3));
                 redPointGeometry.setIndex(new THREE.BufferAttribute(new Uint32Array(redPointIndices), 1));
                 const redPointMesh = new THREE.Mesh(redPointGeometry, debugCircleMaterial);
                 redPointMesh.renderOrder = 3000;
@@ -39290,7 +40603,7 @@ class OmvDebugLabelsTile extends OmvTile_1.OmvTile {
             }
             if (blackPointIndices.length > 0) {
                 blackPointGeometry.addGroup(0, blackPointIndices.length, 0);
-                blackPointGeometry.addAttribute("position", new THREE.BufferAttribute(new Float32Array(blackPointPositions), 3));
+                blackPointGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(blackPointPositions), 3));
                 blackPointGeometry.setIndex(new THREE.BufferAttribute(new Uint32Array(blackPointIndices), 1));
                 const blackPointMesh = new THREE.Mesh(blackPointGeometry, debugBlackCircleMaterial);
                 blackPointMesh.renderOrder = 2500;
@@ -39682,6 +40995,12 @@ class OmvRestClient {
      * Get actual tile URL depending on configured API format.
      */
     dataUrl(tileKey) {
+        if (this.params.url !== undefined) {
+            return this.params.url
+                .replace("{x}", String(tileKey.column))
+                .replace("{y}", String(tileKey.row))
+                .replace("{z}", String(tileKey.level));
+        }
         let path = [`/${tileKey.level}`, tileKey.column, tileKey.row].join(this.params.apiFormat === APIFormat.XYZSpace ? "_" : "/");
         switch (this.params.apiFormat) {
             case APIFormat.HereV1:
@@ -40966,25 +42285,25 @@ class GlyphTextureCache {
         this.m_copyPositions.push(new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2());
         this.m_copyMaterial = new TextMaterials_1.GlyphCopyMaterial();
         this.m_copyVertexBuffer = new THREE.InterleavedBuffer(new Float32Array(capacity * 20), 5);
-        this.m_copyVertexBuffer.setDynamic(true);
+        this.m_copyVertexBuffer.setUsage(THREE.DynamicDrawUsage);
         this.m_copyPositionAttribute = new THREE.InterleavedBufferAttribute(this.m_copyVertexBuffer, 3, 0);
         this.m_copyUVAttribute = new THREE.InterleavedBufferAttribute(this.m_copyVertexBuffer, 2, 3);
         this.m_copyGeometry = new THREE.BufferGeometry();
-        this.m_copyGeometry.addAttribute("position", this.m_copyPositionAttribute);
-        this.m_copyGeometry.addAttribute("uv", this.m_copyUVAttribute);
+        this.m_copyGeometry.setAttribute("position", this.m_copyPositionAttribute);
+        this.m_copyGeometry.setAttribute("uv", this.m_copyUVAttribute);
         const copyIndexBuffer = new THREE.BufferAttribute(new Uint32Array(capacity * 6), 1);
-        copyIndexBuffer.setDynamic(true);
+        copyIndexBuffer.setUsage(THREE.DynamicDrawUsage);
         this.m_copyGeometry.setIndex(copyIndexBuffer);
         this.m_copyMesh = new THREE.Mesh(this.m_copyGeometry, this.m_copyMaterial);
         this.m_copyMesh.frustumCulled = false;
         this.m_copyGeometryDrawCount = 0;
         this.m_clearMaterial = new TextMaterials_1.GlyphClearMaterial();
         this.m_clearPositionAttribute = new THREE.BufferAttribute(new Float32Array(capacity * 8), 2);
-        this.m_clearPositionAttribute.setDynamic(true);
+        this.m_clearPositionAttribute.setUsage(THREE.DynamicDrawUsage);
         this.m_clearGeometry = new THREE.BufferGeometry();
-        this.m_clearGeometry.addAttribute("position", this.m_clearPositionAttribute);
+        this.m_clearGeometry.setAttribute("position", this.m_clearPositionAttribute);
         const clearIndexBuffer = new THREE.BufferAttribute(new Uint32Array(capacity * 6), 1);
-        clearIndexBuffer.setDynamic(true);
+        clearIndexBuffer.setUsage(THREE.DynamicDrawUsage);
         this.m_clearGeometry.setIndex(clearIndexBuffer);
         this.m_clearMesh = new THREE.Mesh(this.m_clearGeometry, this.m_clearMaterial);
         this.m_clearMesh.frustumCulled = false;
@@ -41319,18 +42638,18 @@ class TextGeometry {
         this.m_updateOffset = 0;
         this.m_pickingCount = 0;
         this.m_vertexBuffer = new THREE.InterleavedBuffer(new Float32Array(this.m_currentCapacity * exports.QUAD_VERTEX_MEMORY_FOOTPRINT), exports.VERTEX_BUFFER_STRIDE);
-        this.m_vertexBuffer.setDynamic(true);
+        this.m_vertexBuffer.setUsage(THREE.DynamicDrawUsage);
         this.m_positionAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 0);
         this.m_uvAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 4);
         this.m_colorAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 8);
         this.m_bgColorAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 12);
         this.m_indexBuffer = new THREE.BufferAttribute(new Uint32Array(this.m_currentCapacity * exports.QUAD_INDEX_MEMORY_FOOTPRINT), exports.INDEX_BUFFER_STRIDE);
-        this.m_indexBuffer.setDynamic(true);
+        this.m_indexBuffer.setUsage(THREE.DynamicDrawUsage);
         this.m_geometry = new THREE.BufferGeometry();
-        this.m_geometry.addAttribute("position", this.m_positionAttribute);
-        this.m_geometry.addAttribute("uv", this.m_uvAttribute);
-        this.m_geometry.addAttribute("color", this.m_colorAttribute);
-        this.m_geometry.addAttribute("bgColor", this.m_bgColorAttribute);
+        this.m_geometry.setAttribute("position", this.m_positionAttribute);
+        this.m_geometry.setAttribute("uv", this.m_uvAttribute);
+        this.m_geometry.setAttribute("color", this.m_colorAttribute);
+        this.m_geometry.setAttribute("bgColor", this.m_bgColorAttribute);
         this.m_geometry.setIndex(this.m_indexBuffer);
         this.m_pickingDataArray = new Array(this.m_currentCapacity);
         this.m_mesh = new THREE.Mesh(this.m_geometry, material);
@@ -41605,7 +42924,7 @@ class TextGeometry {
         const newVertexBuffer = new Float32Array(size * exports.QUAD_VERTEX_MEMORY_FOOTPRINT);
         newVertexBuffer.set(this.m_vertexBuffer.array);
         this.m_vertexBuffer = new THREE.InterleavedBuffer(newVertexBuffer, exports.VERTEX_BUFFER_STRIDE);
-        this.m_vertexBuffer.setDynamic(true);
+        this.m_vertexBuffer.setUsage(THREE.DynamicDrawUsage);
         this.m_positionAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 0);
         this.m_uvAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 4);
         this.m_colorAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 8);
@@ -41613,13 +42932,13 @@ class TextGeometry {
         const newIndexBuffer = new Uint32Array(size * exports.QUAD_INDEX_MEMORY_FOOTPRINT);
         newIndexBuffer.set(this.m_indexBuffer.array);
         this.m_indexBuffer = new THREE.BufferAttribute(newIndexBuffer, exports.INDEX_BUFFER_STRIDE);
-        this.m_indexBuffer.setDynamic(true);
+        this.m_indexBuffer.setUsage(THREE.DynamicDrawUsage);
         this.m_geometry.dispose();
         this.m_geometry = new THREE.BufferGeometry();
-        this.m_geometry.addAttribute("position", this.m_positionAttribute);
-        this.m_geometry.addAttribute("uv", this.m_uvAttribute);
-        this.m_geometry.addAttribute("color", this.m_colorAttribute);
-        this.m_geometry.addAttribute("bgColor", this.m_bgColorAttribute);
+        this.m_geometry.setAttribute("position", this.m_positionAttribute);
+        this.m_geometry.setAttribute("uv", this.m_uvAttribute);
+        this.m_geometry.setAttribute("color", this.m_colorAttribute);
+        this.m_geometry.setAttribute("bgColor", this.m_bgColorAttribute);
         this.m_geometry.setIndex(this.m_indexBuffer);
         this.m_pickingDataArray.length = this.m_currentCapacity;
         this.scene.remove(this.m_bgMesh, this.m_mesh);
@@ -43462,7 +44781,11 @@ var UnicodeUtils;
      * Range of Unicode code points considered as `NewLine`.
      * https://en.wikipedia.org/wiki/Newline#Unicode
      */
-    UnicodeUtils.newLineRanges = [[0x000a, 0x000d], [0x0085, 0x0085], [0x2028, 0x2029]];
+    UnicodeUtils.newLineRanges = [
+        [0x000a, 0x000d],
+        [0x0085, 0x0085],
+        [0x2028, 0x2029]
+    ];
     /**
      * Checks if a character should be considered as a new line.
      *
@@ -43483,7 +44806,10 @@ var UnicodeUtils;
      * Range of Unicode code points considered as non-printable.
      * https://en.wikipedia.org/wiki/Unicode_control_characters
      */
-    UnicodeUtils.nonPrintableRanges = [[0x0000, 0x001f], [0x007f, 0x009f]];
+    UnicodeUtils.nonPrintableRanges = [
+        [0x0000, 0x001f],
+        [0x007f, 0x009f]
+    ];
     /**
      * Checks if a character's can be printed (rendered).
      *
@@ -43552,7 +44878,11 @@ var UnicodeUtils;
      * https://en.wikipedia.org/wiki/Basic_Latin_(Unicode_block)#Table_of_characters
      * https://en.wikipedia.org/wiki/Arabic_(Unicode_block)#Block
      */
-    UnicodeUtils.weakBidirectionalRanges = [[0x0030, 0x0039], [0x0660, 0x0669], [0x06f0, 0x06f9]];
+    UnicodeUtils.weakBidirectionalRanges = [
+        [0x0030, 0x0039],
+        [0x0660, 0x0669],
+        [0x06f0, 0x06f9]
+    ];
     /**
      * Returns the Unicode's character direction.
      *
@@ -43878,7 +45208,7 @@ __export(__webpack_require__(/*! ./lib/ContextLogger */ "../harp-utils/lib/Conte
 __export(__webpack_require__(/*! ./lib/PerformanceTimer */ "../harp-utils/lib/PerformanceTimer.ts"));
 __export(__webpack_require__(/*! ./lib/ObjectUtils */ "../harp-utils/lib/ObjectUtils.ts"));
 __export(__webpack_require__(/*! ./lib/OptionsUtils */ "../harp-utils/lib/OptionsUtils.ts"));
-__export(__webpack_require__(/*! ./lib/UrlResolver */ "../harp-utils/lib/UrlResolver.ts"));
+__export(__webpack_require__(/*! ./lib/UriResolver */ "../harp-utils/lib/UriResolver.ts"));
 __export(__webpack_require__(/*! ./lib/UrlUtils */ "../harp-utils/lib/UrlUtils.ts"));
 __export(__webpack_require__(/*! ./lib/UrlPlatformUtils */ "../harp-utils/lib/UrlPlatformUtils.web.ts"));
 __export(__webpack_require__(/*! ./lib/Functions */ "../harp-utils/lib/Functions.ts"));
@@ -44397,7 +45727,11 @@ class LoggerManagerImpl {
     getLogger(name) {
         return this.m_loggers.find(logger => logger.name === name);
     }
-    create(loggerName, options) {
+    create(loggerName, options = {}) {
+        if (this.m_levelSetForAll !== undefined &&
+            (options.level === undefined || options.level < this.m_levelSetForAll)) {
+            options.level = this.m_levelSetForAll;
+        }
         const logger = new Logger_1.Logger(loggerName, this.channel, options);
         this.m_loggers.push(logger);
         return logger;
@@ -44430,6 +45764,7 @@ class LoggerManagerImpl {
         this.update(loggerName, { enabled: value });
     }
     setLogLevelForAll(level) {
+        this.m_levelSetForAll = level;
         for (const logger of this.m_loggers) {
             logger.level = level;
         }
@@ -45200,6 +46535,106 @@ PerformanceTimer.nowFunc = PerformanceTimer.getNowFunc();
 
 /***/ }),
 
+/***/ "../harp-utils/lib/UriResolver.ts":
+/*!****************************************!*\
+  !*** ../harp-utils/lib/UriResolver.ts ***!
+  \****************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const UrlUtils_1 = __webpack_require__(/*! ./UrlUtils */ "../harp-utils/lib/UrlUtils.ts");
+/**
+ * Basic, import-map like [[UriResolver]].
+ *
+ * Resolves `uris` basing on exact or prefix match of `key` from `definitions`.
+ *
+ * In definitions, `key` is matched against input uri with following strategy:
+ *  - `key` without trailing `/` -> `key` and input `uri` must be identical
+ *  - `key` with trailing `/`, -> `key` is treated as "package prefix", so `uri` must start with
+ *    `key`
+ *
+ * Example:
+ * ```
+ * {
+ *     "local://poiMasterList": "/assets/poiMasterList.json"
+ *        // will match only 'local://poiMasterList' and resolve `/assets/poiMasterList.json`
+ *     "local://icons/": "/assets/icons/"
+ *        // will match only 'local://icons/ANYPATH' (and similar) and resolve to
+ *        // `/assets/icons/ANYPATH
+ * }
+ * ```
+ * Inspired by [`WICG` import maps proposal](https://github.com/WICG/import-maps#the-import-map).
+ */
+class PrefixMapUriResolver {
+    constructor(definitions) {
+        this.definitions = definitions;
+    }
+    resolveUri(uri) {
+        return Object.keys(this.definitions).reduce((r, key) => {
+            if (key.endsWith("/") && r.startsWith(key)) {
+                const newPrefix = this.definitions[key];
+                return newPrefix + r.substr(key.length);
+            }
+            else if (r === key) {
+                return this.definitions[key];
+            }
+            return r;
+        }, uri);
+    }
+}
+exports.PrefixMapUriResolver = PrefixMapUriResolver;
+/**
+ * [UriResolver] that resolve relative `uri`s against to parent resource `uri`.
+ */
+class RelativeUriResolver {
+    constructor(parentUri) {
+        this.parentUri = parentUri;
+    }
+    resolveUri(uri) {
+        return UrlUtils_1.resolveReferenceUri(this.parentUri, uri);
+    }
+}
+exports.RelativeUriResolver = RelativeUriResolver;
+/**
+ * Compose URI resolvers.
+ *
+ * Creates new [[UriResolver]] that applies resolvers in orders or arguments.
+ *
+ * Example:
+ *
+ *     const themeUrl = ...; // url of parent object
+ *     const childUrlResolver = composeUrlResolvers(
+ *           new RelativeUriResolver(themeUrl),
+ *           defaultUrlResolver
+ *     );
+ */
+function composeUriResolvers(...resolvers) {
+    return {
+        resolveUri(originalUrl) {
+            return resolvers.reduce((url, resolver) => {
+                if (resolver !== undefined) {
+                    return resolver.resolveUri(url);
+                }
+                else {
+                    return url;
+                }
+            }, originalUrl);
+        }
+    };
+}
+exports.composeUriResolvers = composeUriResolvers;
+
+
+/***/ }),
+
 /***/ "../harp-utils/lib/UrlPlatformUtils.web.ts":
 /*!*************************************************!*\
   !*** ../harp-utils/lib/UrlPlatformUtils.web.ts ***!
@@ -45232,78 +46667,6 @@ exports.getAppBaseUrl = getAppBaseUrl;
 
 /***/ }),
 
-/***/ "../harp-utils/lib/UrlResolver.ts":
-/*!****************************************!*\
-  !*** ../harp-utils/lib/UrlResolver.ts ***!
-  \****************************************/
-/*! no static exports found */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-/*
- * Copyright (C) 2017-2019 HERE Europe B.V.
- * Licensed under Apache 2.0, see full license in LICENSE
- * SPDX-License-Identifier: Apache-2.0
- */
-Object.defineProperty(exports, "__esModule", { value: true });
-/**
- * Resolves URL using default URL resolver.
- *
- * By default URL resolver is just identity function, it can be changed using
- * [[setDefaultUrlResolver].
- */
-function defaultUrlResolver(url) {
-    if (customDefaultUrlResolver !== undefined) {
-        return customDefaultUrlResolver(url);
-    }
-    else {
-        return url;
-    }
-}
-exports.defaultUrlResolver = defaultUrlResolver;
-/**
- * Change resolver used by [[defaultUrlResolver]].
- *
- * `undefined` resets default resolver to identity function.
- *
- * @param resolver
- */
-function setDefaultUrlResolver(resolver) {
-    customDefaultUrlResolver = resolver;
-}
-exports.setDefaultUrlResolver = setDefaultUrlResolver;
-let customDefaultUrlResolver;
-/**
- * Compose URL resolvers.
- *
- * Creates new `UrlResolver` that applies resolvers in orders or arguments.
- *
- * Example:
- *
- *     const themeUrl = ...; // url of parent object
- *     const childUrlResolver = composeUrlResolvers(
- *           (childUrl: string) => resolveReferenceUrl(themeUrl, childUrl),
- *           defaultUrlResolver
- *     );
- */
-function composeUrlResolvers(...resolvers) {
-    return (originalUrl) => {
-        return resolvers.reduce((url, resolver) => {
-            if (resolver !== undefined) {
-                return resolver(url);
-            }
-            else {
-                return url;
-            }
-        }, originalUrl);
-    };
-}
-exports.composeUrlResolvers = composeUrlResolvers;
-
-
-/***/ }),
-
 /***/ "../harp-utils/lib/UrlUtils.ts":
 /*!*************************************!*\
   !*** ../harp-utils/lib/UrlUtils.ts ***!
@@ -45320,14 +46683,14 @@ exports.composeUrlResolvers = composeUrlResolvers;
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 /**
- * Resolve URL of referenced object.
+ * Resolve URI of referenced object w.r.t parent URI.
  *
- * Resolves `childUrl` as it would be loaded from location specified by `parentUrl`.
+ * Resolves `childUri` as it would be loaded from location specified by `parentUri`.
  *
- * If `childUrl` is absolute, then it is returned unchanged.
- * If `childUrl` is origin-absolute path, then only origin path is taken from `parentUrl`.
+ * If `childUri` is absolute, then it is returned unchanged.
+ * If `childUri` is origin-absolute path, then only origin path is taken from `parentUri`.
  *
- * See [[baseUrl]] for reference how base URL of `parentUrl` is determined.
+ * See [[baseUri]] for reference how base URL of `parentUri` is determined.
  *
  * Examples:
  *
@@ -45343,27 +46706,27 @@ Object.defineProperty(exports, "__esModule", { value: true });
  *     // origin-absolute URL, takes only origin from parent
  *     https://foo.com/themes/day.json + /fonts/foo.json -> https://foo.com/fonts/foo.json
  *
- * @param parentUrl URL of parent resource
- * @param childUrl URL of child as referenced from parent resource
+ * @param parentUri URI of parent resource
+ * @param childUri URI of child as referenced from parent resource
  * @return `childUrl` as if anchored in location of `parentUrl`
  */
-function resolveReferenceUrl(parentUrl, childUrl) {
-    if (absoluteUrlWithOriginRe.test(childUrl)) {
-        return childUrl;
+function resolveReferenceUri(parentUri, childUri) {
+    if (absoluteUrlWithOriginRe.test(childUri)) {
+        return childUri;
     }
-    else if (childUrl.startsWith("/")) {
-        const origin = getUrlOrigin(parentUrl);
-        return origin + childUrl;
+    else if (childUri.startsWith("/")) {
+        const origin = getUrlOrigin(parentUri);
+        return origin + childUri;
     }
     else {
-        if (childUrl.startsWith("./")) {
-            childUrl = childUrl.substr(2);
+        if (childUri.startsWith("./")) {
+            childUri = childUri.substr(2);
         }
-        const parentBaseUrl = baseUrl(parentUrl);
-        return parentBaseUrl + childUrl;
+        const parentBaseUrl = baseUrl(parentUri);
+        return parentBaseUrl + childUri;
     }
 }
-exports.resolveReferenceUrl = resolveReferenceUrl;
+exports.resolveReferenceUri = resolveReferenceUri;
 const absoluteUrlWithOriginRe = new RegExp("^(?:[a-z]+:)?//", "i");
 /**
  * Returns base URL of given resource URL.
@@ -45696,9 +47059,9 @@ class WebTileDataSource extends harp_mapview_1.DataSource {
                     .projectPoint(new harp_geoutils_1.GeoCoordinates(north, east), tmpV)
                     .toArray()
             ]), 3);
-            g.addAttribute("position", posAttr);
+            g.setAttribute("position", posAttr);
             const uvAttr = new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), 2);
-            g.addAttribute("uv", uvAttr);
+            g.setAttribute("uv", uvAttr);
             g.setIndex(new THREE.BufferAttribute(new Uint16Array([0, 1, 2, 2, 1, 3]), 1));
             if (shouldSubdivide) {
                 const modifier = new SphericalGeometrySubdivisionModifier_1.SphericalGeometrySubdivisionModifier(THREE.Math.degToRad(10), sourceProjection);
@@ -45822,7 +47185,7 @@ const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/
 /**
  * Default decoder url for bundled map component.
  */
-exports.DEFAULT_DECODER_SCRIPT_URL = "harp.gl:harp-decoders.js";
+exports.DEFAULT_DECODER_SCRIPT_URL = "harp.js-bundle://harp-decoders.js";
 /**
  * Basename of map bundle script - used by [[getBundleScriptUrl]] as fallback, when
  * `document.currentScript` is not present.
@@ -45845,7 +47208,12 @@ function getBundleScriptUrl() {
         return bundleScriptUrl;
     }
     const currentScript = document.currentScript;
-    const baseScriptUrl = currentScript ? currentScript.src : getScriptUrl(exports.BUNDLE_SCRIPT_BASENAME);
+    const baseScriptUrl = currentScript !== null &&
+        typeof currentScript.src === "string" &&
+        (currentScript.src.endsWith(exports.BUNDLE_SCRIPT_BASENAME + ".js") ||
+            currentScript.src.endsWith(exports.BUNDLE_SCRIPT_BASENAME + ".min.js"))
+        ? currentScript.src
+        : getScriptUrl(exports.BUNDLE_SCRIPT_BASENAME);
     if (baseScriptUrl) {
         bundleScriptUrl = baseScriptUrl;
         return bundleScriptUrl;
@@ -45883,7 +47251,7 @@ function getScriptUrl(name) {
     }
 }
 exports.getScriptUrl = getScriptUrl;
-const HARP_GL_BUNDLED_ASSETS_PREFIX = "harp.gl:";
+const HARP_GL_BUNDLED_ASSETS_PREFIX = "harp.js-bundle://";
 /**
  * Resolve URLs with support for `harp.gl` bundle specific URLs.
  *
@@ -45891,23 +47259,26 @@ const HARP_GL_BUNDLED_ASSETS_PREFIX = "harp.gl:";
  *
  * @hidden
  */
-function resolveBundledResourceUrl(url) {
-    if (url.startsWith(HARP_GL_BUNDLED_ASSETS_PREFIX)) {
-        const bundleSriptUrl = getBundleScriptUrl();
-        if (bundleSriptUrl === null || bundleSriptUrl === undefined) {
-            throw new Error(`harp.js: cannot resolve ${url} because 'harp.gl' base url is not set.`);
-        }
-        else {
-            url = url.substring(HARP_GL_BUNDLED_ASSETS_PREFIX.length);
-            if (url.startsWith("/")) {
-                url = url.substring(1);
+class BundledUriResolver {
+    resolveUri(uri) {
+        if (uri.startsWith(HARP_GL_BUNDLED_ASSETS_PREFIX)) {
+            const bundleSriptUrl = getBundleScriptUrl();
+            if (bundleSriptUrl === null || bundleSriptUrl === undefined) {
+                throw new Error(`harp.js: cannot resolve ${uri} because 'harp.gl' base url is not set.`);
             }
-            return harp_utils_1.baseUrl(bundleSriptUrl) + url;
+            else {
+                uri = uri.substring(HARP_GL_BUNDLED_ASSETS_PREFIX.length);
+                if (uri.startsWith("/")) {
+                    uri = uri.substring(1);
+                }
+                return harp_utils_1.baseUrl(bundleSriptUrl) + uri;
+            }
         }
+        return uri;
     }
-    return url;
 }
-exports.resolveBundledResourceUrl = resolveBundledResourceUrl;
+exports.BundledUriResolver = BundledUriResolver;
+const bundledUriResolver = new BundledUriResolver();
 const getActualDecoderScriptUrl = () => {
     const baseScriptUrl = getBundleScriptUrl();
     if (!baseScriptUrl) {
@@ -45924,7 +47295,7 @@ const getActualDecoderScriptUrl = () => {
     const decoderScriptName = !isMinified
         ? exports.DEFAULT_DECODER_SCRIPT_URL
         : exports.DEFAULT_DECODER_SCRIPT_URL.replace(".js$", ".min.js");
-    return resolveBundledResourceUrl(decoderScriptName);
+    return bundledUriResolver.resolveUri(decoderScriptName);
 };
 /**
  * Guess decoder script URL.
@@ -45966,10 +47337,7 @@ function installDefaultDecoderUrlHook() {
  * @hidden
  */
 function mapBundleMain() {
-    const mapBundleUrl = getBundleScriptUrl();
-    if (mapBundleUrl !== null && mapBundleUrl !== undefined) {
-        harp_utils_1.setDefaultUrlResolver(resolveBundledResourceUrl);
-    }
+    getBundleScriptUrl();
     installDefaultDecoderUrlHook();
 }
 exports.mapBundleMain = mapBundleMain;
@@ -46003,10 +47371,10 @@ if (!window.THREE) {
 }
 __export(__webpack_require__(/*! @here/harp-mapview */ "../harp-mapview/index.ts"));
 __export(__webpack_require__(/*! @here/harp-omv-datasource */ "../harp-omv-datasource/index.ts"));
+__export(__webpack_require__(/*! @here/harp-debug-datasource */ "../harp-debug-datasource/index.ts"));
 __export(__webpack_require__(/*! @here/harp-geojson-datasource */ "../harp-geojson-datasource/index.ts"));
 __export(__webpack_require__(/*! @here/harp-features-datasource */ "../harp-features-datasource/index.ts"));
 __export(__webpack_require__(/*! @here/harp-webtile-datasource */ "../harp-webtile-datasource/index.ts"));
-__export(__webpack_require__(/*! @here/harp-debug-datasource */ "../harp-debug-datasource/index.ts"));
 __export(__webpack_require__(/*! @here/harp-map-controls/lib/MapControls */ "../harp-map-controls/lib/MapControls.ts"));
 __export(__webpack_require__(/*! @here/harp-map-controls/lib/MapControlsUI */ "../harp-map-controls/lib/MapControlsUI.ts"));
 __export(__webpack_require__(/*! @here/harp-datasource-protocol */ "../harp-datasource-protocol/index.ts"));

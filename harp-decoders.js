@@ -6367,11 +6367,23 @@ var ExprScope;
      * The scope of an [[Expr]] used in a [[Technique]] `when` condition.
      */
     ExprScope[ExprScope["Condition"] = 1] = "Condition";
+    /**
+     * The scope of an [[Expr]] used as dynamic property attribute value.
+     */
+    ExprScope[ExprScope["Dynamic"] = 2] = "Dynamic";
 })(ExprScope = exports.ExprScope || (exports.ExprScope = {}));
 /**
  * Abstract class defining a shape of a [[Theme]]'s expression
  */
 class Expr {
+    /**
+     * Tests of given value is an [[Expr]].
+     *
+     * @param value The object to test.
+     */
+    static isExpr(value) {
+        return value instanceof Expr;
+    }
     /**
      * Creates an expression from the given `code`.
      *
@@ -6620,6 +6632,25 @@ class VarExpr extends Expr {
 }
 exports.VarExpr = VarExpr;
 class LiteralExpr extends Expr {
+    /**
+     * Create a [[LiteralExpr]] from the given value.
+     *
+     * @param value A constant value.
+     */
+    static fromValue(value) {
+        switch (typeof value) {
+            case "boolean":
+                return new BooleanLiteralExpr(value);
+            case "number":
+                return new NumberLiteralExpr(value);
+            case "string":
+                return new StringLiteralExpr(value);
+            case "object":
+                return value === null ? NullLiteralExpr.instance : new ObjectLiteralExpr(value);
+            default:
+                throw new Error(`failed to create a literal from '${value}'`);
+        } // switch
+    }
 }
 exports.LiteralExpr = LiteralExpr;
 /**
@@ -6876,6 +6907,7 @@ class ExprSerializer {
  * SPDX-License-Identifier: Apache-2.0
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+const Expr_1 = __webpack_require__(/*! ./Expr */ "../harp-datasource-protocol/lib/Expr.ts");
 const ArrayOperators_1 = __webpack_require__(/*! ./operators/ArrayOperators */ "../harp-datasource-protocol/lib/operators/ArrayOperators.ts");
 const CastOperators_1 = __webpack_require__(/*! ./operators/CastOperators */ "../harp-datasource-protocol/lib/operators/CastOperators.ts");
 const ColorOperators_1 = __webpack_require__(/*! ./operators/ColorOperators */ "../harp-datasource-protocol/lib/operators/ColorOperators.ts");
@@ -6898,12 +6930,52 @@ class ExprEvaluatorContext {
         this.env = env;
         this.scope = scope;
         this.cache = cache;
+        this.m_partialEvaluation = false;
     }
+    /**
+     * `true` if the this context is used to partially evaluate expressions.
+     */
+    get partialEvaluation() {
+        return this.m_partialEvaluation;
+    }
+    /**
+     * Evaluate the given expression.
+     *
+     * @param expr The [[Expr]] to evaluate.
+     */
     evaluate(expr) {
         if (expr !== undefined) {
             return expr.accept(this.evaluator, this);
         }
         throw new Error("Failed to evaluate expression");
+    }
+    /**
+     * Partially evaluate the given expression.
+     *
+     * @param expr The [[Expr]] to evaluate.
+     */
+    partiallyEvaluate(expr) {
+        if (expr === undefined) {
+            throw new Error("Failed to evaluate expression");
+        }
+        const previousEvaluationMode = this.m_partialEvaluation;
+        this.m_partialEvaluation = true;
+        try {
+            const value = expr.accept(this.evaluator, this);
+            this.m_partialEvaluation = previousEvaluationMode;
+            if (value instanceof Expr_1.Expr) {
+                return value;
+            }
+            return Expr_1.LiteralExpr.fromValue(value);
+        }
+        catch (error) {
+            // rethrow the exception
+            throw error;
+        }
+        finally {
+            // reset the evaluation mode.
+            this.m_partialEvaluation = previousEvaluationMode;
+        }
     }
 }
 exports.ExprEvaluatorContext = ExprEvaluatorContext;
@@ -6972,47 +7044,22 @@ class ExprEvaluator {
         return context.evaluate(match.fallback);
     }
     visitCallExpr(expr, context) {
-        switch (expr.op) {
-            case "all":
-                for (const childExpr of expr.args) {
-                    if (!childExpr.accept(this, context)) {
-                        return false;
-                    }
-                }
-                return true;
-            case "any":
-                for (const childExpr of expr.args) {
-                    if (childExpr.accept(this, context)) {
-                        return true;
-                    }
-                }
-                return false;
-            case "none":
-                for (const childExpr of expr.args) {
-                    if (childExpr.accept(this, context)) {
-                        return false;
-                    }
-                }
-                return true;
-            default: {
-                if (context.cache !== undefined) {
-                    const v = context.cache.get(expr);
-                    if (v !== undefined) {
-                        return v;
-                    }
-                }
-                const descriptor = expr.descriptor || operatorDescriptors.get(expr.op);
-                if (descriptor) {
-                    expr.descriptor = descriptor;
-                    const result = descriptor.call(context, expr);
-                    if (context.cache) {
-                        context.cache.set(expr, result);
-                    }
-                    return result;
-                }
-                throw new Error(`undefined operator '${expr.op}`);
+        if (context.cache !== undefined) {
+            const v = context.cache.get(expr);
+            if (v !== undefined) {
+                return v;
             }
-        } // switch
+        }
+        const descriptor = expr.descriptor || operatorDescriptors.get(expr.op);
+        if (descriptor) {
+            expr.descriptor = descriptor;
+            const result = descriptor.call(context, expr);
+            if (context.cache) {
+                context.cache.set(expr, result);
+            }
+            return result;
+        }
+        throw new Error(`undefined operator '${expr.op}`);
     }
 }
 exports.ExprEvaluator = ExprEvaluator;
@@ -7763,19 +7810,22 @@ exports.addExtrudedWalls = addExtrudedWalls;
  * SPDX-License-Identifier: Apache-2.0
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-const three_1 = __webpack_require__(/*! three */ "three");
+const THREE = __webpack_require__(/*! three */ "three");
 const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
+const Env_1 = __webpack_require__(/*! ./Env */ "../harp-datasource-protocol/lib/Env.ts");
 const ExponentialInterpolant_1 = __webpack_require__(/*! ./ExponentialInterpolant */ "../harp-datasource-protocol/lib/ExponentialInterpolant.ts");
+const Expr_1 = __webpack_require__(/*! ./Expr */ "../harp-datasource-protocol/lib/Expr.ts");
 const InterpolatedPropertyDefs_1 = __webpack_require__(/*! ./InterpolatedPropertyDefs */ "../harp-datasource-protocol/lib/InterpolatedPropertyDefs.ts");
 const StringEncodedNumeral_1 = __webpack_require__(/*! ./StringEncodedNumeral */ "../harp-datasource-protocol/lib/StringEncodedNumeral.ts");
 const logger = harp_utils_1.LoggerManager.instance.create("InterpolatedProperty");
 const interpolants = [
-    three_1.DiscreteInterpolant,
-    three_1.LinearInterpolant,
-    three_1.CubicInterpolant,
+    THREE.DiscreteInterpolant,
+    THREE.LinearInterpolant,
+    THREE.CubicInterpolant,
     ExponentialInterpolant_1.ExponentialInterpolant
 ];
-const tmpColor = new three_1.Color();
+const tmpColor = new THREE.Color();
+const tmpBuffer = new Array(StringEncodedNumeral_1.StringEncodedNumeralFormatMaxSize);
 /**
  * Checks if a property is interpolated.
  * @param p property to be checked
@@ -7811,40 +7861,46 @@ function isInterpolatedProperty(p) {
 }
 exports.isInterpolatedProperty = isInterpolatedProperty;
 /**
- * Get the value of the specified property at the given zoom level.
+ * A temp [[Env]] containing the arguments passed to `getPropertyValue`.
  *
- * @param property Property of a technique.
- * @param level Display level the property should be rendered at.
- * @param pixelToMeters Optional pixels to meters conversion factor (needed for proper
- * interpolation of `length` values).
+ * [[dynamicPropertiesTempEnv]] is used when `getPropertyValue` is
+ * invoked with explicit values for `zoom` and `pixelToMeters` instead
+ * of with an [[Env]].
  *
+ * @hidden
  */
-function getPropertyValue(property, level, pixelToMeters = 1.0) {
-    if (isInterpolatedPropertyDefinition(property)) {
-        throw new Error("Cannot interpolate a InterpolatedPropertyDefinition.");
+const dynamicPropertiesTempEnv = new Env_1.MapEnv({
+    $zoom: 0,
+    $pixelToMeters: 1
+});
+function getPropertyValue(property, envOrLevel, pixelToMeters = 1.0) {
+    if (Expr_1.Expr.isExpr(property)) {
+        let env;
+        if (typeof envOrLevel === "number") {
+            dynamicPropertiesTempEnv.entries.$zoom = envOrLevel;
+            dynamicPropertiesTempEnv.entries.$pixelToMeters = pixelToMeters;
+            env = dynamicPropertiesTempEnv;
+        }
+        else {
+            env = envOrLevel;
+        }
+        return property.evaluate(env, Expr_1.ExprScope.Dynamic);
     }
-    else if (!isInterpolatedProperty(property)) {
+    let level;
+    if (typeof envOrLevel === "number") {
+        level = envOrLevel;
+    }
+    else {
+        level = envOrLevel.lookup("$zoom");
+        pixelToMeters = envOrLevel.lookup("$pixelToMeters");
+    }
+    if (!isInterpolatedProperty(property)) {
         if (typeof property !== "string") {
             return property;
         }
         else {
-            const matchedFormat = StringEncodedNumeral_1.StringEncodedNumeralFormats.find(format => format.regExp.test(property));
-            if (matchedFormat === undefined) {
-                return property;
-            }
-            switch (matchedFormat.type) {
-                case StringEncodedNumeral_1.StringEncodedNumeralType.Meters:
-                    return matchedFormat.decoder(property)[0];
-                case StringEncodedNumeral_1.StringEncodedNumeralType.Pixels:
-                    return matchedFormat.decoder(property)[0] * pixelToMeters;
-                case StringEncodedNumeral_1.StringEncodedNumeralType.Hex:
-                case StringEncodedNumeral_1.StringEncodedNumeralType.RGB:
-                case StringEncodedNumeral_1.StringEncodedNumeralType.HSL:
-                    const hslValues = matchedFormat.decoder(property);
-                    return tmpColor.setHSL(hslValues[0], hslValues[1], hslValues[2]).getHex();
-                default:
-                    return matchedFormat.decoder(property)[0];
-            }
+            const value = StringEncodedNumeral_1.parseStringEncodedNumeral(property, pixelToMeters);
+            return value !== undefined ? value : property;
         }
     }
     else if (property._stringEncodedNumeralType !== undefined) {
@@ -7854,6 +7910,7 @@ function getPropertyValue(property, level, pixelToMeters = 1.0) {
                 return getInterpolatedLength(property, level, pixelToMeters);
             case StringEncodedNumeral_1.StringEncodedNumeralType.Hex:
             case StringEncodedNumeral_1.StringEncodedNumeralType.RGB:
+            case StringEncodedNumeral_1.StringEncodedNumeralType.RGBA:
             case StringEncodedNumeral_1.StringEncodedNumeralType.HSL:
                 return getInterpolatedColor(property, level);
         }
@@ -7891,8 +7948,10 @@ function getInterpolatedColor(property, level) {
         interpolant.exponent = property.exponent;
     }
     interpolant.evaluate(level);
+    // Color.setRGB() does not clamp the values which may be out of
+    // color channels boundaries after interpolation.
     return tmpColor
-        .setHSL(interpolant.resultBuffer[0], interpolant.resultBuffer[1], interpolant.resultBuffer[2])
+        .setRGB(THREE.Math.clamp(interpolant.resultBuffer[0], 0, 1), THREE.Math.clamp(interpolant.resultBuffer[1], 0, 1), THREE.Math.clamp(interpolant.resultBuffer[2], 0, 1))
         .getHex();
 }
 /**
@@ -7945,9 +8004,14 @@ function createInterpolatedProperty(prop) {
 }
 exports.createInterpolatedProperty = createInterpolatedProperty;
 function removeDuplicatePropertyValues(p) {
+    const eps = 0.001;
+    // detect cubic interpolations and remove stops
+    // closer than `eps`, this is needed to avoid
+    // possible NaN generated by the cubic interpolator.
+    const isCubic = p.interpolation === "Cubic";
     for (let i = 0; i < p.values.length; ++i) {
-        const firstIdx = p.zoomLevels.findIndex((a) => {
-            return a === p.zoomLevels[i];
+        const firstIdx = p.zoomLevels.findIndex(a => {
+            return isCubic ? Math.abs(a - p.zoomLevels[i]) < eps : a === p.zoomLevels[i];
         });
         if (firstIdx !== i) {
             p.zoomLevels.splice(--i, 1);
@@ -7955,29 +8019,31 @@ function removeDuplicatePropertyValues(p) {
         }
     }
 }
-const colorFormats = [StringEncodedNumeral_1.StringEncodedHSL, StringEncodedNumeral_1.StringEncodedHex, StringEncodedNumeral_1.StringEncodedRGB];
-const worldSizeFormats = [StringEncodedNumeral_1.StringEncodedMeters, StringEncodedNumeral_1.StringEncodedPixels];
 function procesStringEnocodedNumeralInterpolatedProperty(baseFormat, prop, propValues, maskValues) {
     let needsMask = false;
     const allowedValueFormats = baseFormat.type === StringEncodedNumeral_1.StringEncodedNumeralType.Meters ||
         baseFormat.type === StringEncodedNumeral_1.StringEncodedNumeralType.Pixels
-        ? worldSizeFormats
-        : colorFormats;
+        ? StringEncodedNumeral_1.StringEncodedMetricFormats
+        : StringEncodedNumeral_1.StringEncodedColorFormats;
     for (let valueIdx = 0; valueIdx < prop.values.length; ++valueIdx) {
+        let matched = false;
         for (const valueFormat of allowedValueFormats) {
             const value = prop.values[valueIdx];
-            if (!valueFormat.regExp.test(value)) {
+            matched = valueFormat.decoder(value, tmpBuffer);
+            if (!matched) {
                 continue;
             }
             if (valueFormat.mask !== undefined) {
                 maskValues[valueIdx] = valueFormat.mask;
                 needsMask = true;
             }
-            const result = valueFormat.decoder(value);
-            for (let i = 0; i < result.length; ++i) {
-                propValues[valueIdx * valueFormat.size + i] = result[i];
+            for (let i = 0; i < valueFormat.size; ++i) {
+                propValues[valueIdx * valueFormat.size + i] = tmpBuffer[i];
             }
             break;
+        }
+        if (!matched) {
+            throw Error(`Not all interpolation values match the same format: ${JSON.stringify(prop)}`);
         }
     }
     return needsMask;
@@ -8144,9 +8210,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
  * Licensed under Apache 2.0, see full license in LICENSE
  * SPDX-License-Identifier: Apache-2.0
  */
+const harp_utils_1 = __webpack_require__(/*! @here/harp-utils */ "../harp-utils/index.ts");
 const three_1 = __webpack_require__(/*! three */ "three");
 const tmpColor = new three_1.Color();
-const tmpHSL = { h: 0, s: 0, l: 0 };
 /**
  * Enumeration of supported string encoded numerals.
  */
@@ -8156,72 +8222,206 @@ var StringEncodedNumeralType;
     StringEncodedNumeralType[StringEncodedNumeralType["Pixels"] = 1] = "Pixels";
     StringEncodedNumeralType[StringEncodedNumeralType["Hex"] = 2] = "Hex";
     StringEncodedNumeralType[StringEncodedNumeralType["RGB"] = 3] = "RGB";
-    StringEncodedNumeralType[StringEncodedNumeralType["HSL"] = 4] = "HSL";
+    StringEncodedNumeralType[StringEncodedNumeralType["RGBA"] = 4] = "RGBA";
+    StringEncodedNumeralType[StringEncodedNumeralType["HSL"] = 5] = "HSL";
 })(StringEncodedNumeralType = exports.StringEncodedNumeralType || (exports.StringEncodedNumeralType = {}));
-exports.StringEncodedMeters = {
+const StringEncodedMeters = {
     type: StringEncodedNumeralType.Meters,
     size: 1,
-    regExp: /((?=\.\d|\d)(?:\d+)?(?:\.?\d*))m/,
-    decoder: (encodedValue) => {
-        return [Number(exports.StringEncodedMeters.regExp.exec(encodedValue)[1])];
+    regExp: /^((?=\.\d|\d)(?:\d+)?(?:\.?\d*))m$/,
+    decoder: (encodedValue, target) => {
+        const match = StringEncodedMeters.regExp.exec(encodedValue);
+        return match ? (target[0] = Number(match[1])) !== undefined : false;
     }
 };
-exports.StringEncodedPixels = {
+const StringEncodedPixels = {
     type: StringEncodedNumeralType.Pixels,
     size: 1,
     mask: 1.0,
-    regExp: /((?=\.\d|\d)(?:\d+)?(?:\.?\d*))px/,
-    decoder: (encodedValue) => {
-        return [Number(exports.StringEncodedPixels.regExp.exec(encodedValue)[1])];
+    regExp: /^((?=\.\d|\d)(?:\d+)?(?:\.?\d*))px$/,
+    decoder: (encodedValue, target) => {
+        const match = StringEncodedPixels.regExp.exec(encodedValue);
+        if (match === null) {
+            return false;
+        }
+        target[0] = Number(match[1]);
+        return true;
     }
 };
-exports.StringEncodedHex = {
+const StringEncodedHex = {
     type: StringEncodedNumeralType.Hex,
     size: 3,
-    regExp: /#([0-9A-Fa-f]{1,2})([0-9A-Fa-f]{1,2})([0-9A-Fa-f]{1,2})/,
-    decoder: (encodedValue) => {
-        tmpColor.set(encodedValue).getHSL(tmpHSL);
-        return [tmpHSL.h, tmpHSL.s, tmpHSL.l];
+    regExp: /^\#((?:[0-9A-Fa-f][0-9A-Fa-f]){3,4}|[0-9A-Fa-f]{3,4})$/,
+    decoder: (encodedValue, target) => {
+        const match = StringEncodedHex.regExp.exec(encodedValue);
+        if (match === null) {
+            return false;
+        }
+        const hex = match[1];
+        const size = hex.length;
+        // Only few sizes are possible for given reg-exp.
+        harp_utils_1.assert(size === 3 || size === 4 || size === 6 || size === 8, `Matched incorrect hex format: ${encodedValue}`);
+        // Note that we simply ignore alpha channel value.
+        // TODO: To be resolved with HARP-7517
+        if (size === 3 || size === 4) {
+            // #RGB or #RGBA
+            target[0] = parseInt(hex.charAt(0) + hex.charAt(0), 16) / 255;
+            target[1] = parseInt(hex.charAt(1) + hex.charAt(1), 16) / 255;
+            target[2] = parseInt(hex.charAt(2) + hex.charAt(2), 16) / 255;
+        }
+        else if (size === 6 || size === 8) {
+            // #RRGGBB or #RRGGBBAA
+            target[0] = parseInt(hex.charAt(0) + hex.charAt(1), 16) / 255;
+            target[1] = parseInt(hex.charAt(2) + hex.charAt(3), 16) / 255;
+            target[2] = parseInt(hex.charAt(4) + hex.charAt(5), 16) / 255;
+        }
+        return true;
     }
 };
-exports.StringEncodedRGB = {
+const StringEncodedRGB = {
     type: StringEncodedNumeralType.RGB,
     size: 3,
     // tslint:disable-next-line:max-line-length
-    regExp: /rgb\((?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]))\)/,
-    decoder: (encodedValue) => {
-        const channels = exports.StringEncodedRGB.regExp.exec(encodedValue);
-        tmpColor
-            .setRGB(parseInt(channels[1], 10) / 255, parseInt(channels[2], 10) / 255, parseInt(channels[3], 10) / 255)
-            .getHSL(tmpHSL);
-        return [tmpHSL.h, tmpHSL.s, tmpHSL.l];
+    regExp: /^rgb\( ?(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5])) ?\)$/,
+    decoder: (encodedValue, target) => {
+        const channels = StringEncodedRGB.regExp.exec(encodedValue);
+        if (channels === null) {
+            return false;
+        }
+        target[0] = parseInt(channels[1], 10) / 255;
+        target[1] = parseInt(channels[2], 10) / 255;
+        target[2] = parseInt(channels[3], 10) / 255;
+        return true;
     }
 };
-exports.StringEncodedHSL = {
+const StringEncodedRGBA = {
+    type: StringEncodedNumeralType.RGBA,
+    size: 3,
+    // tslint:disable-next-line:max-line-length
+    regExp: /^rgba\( ?(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:([0-9]{1,2}|1[0-9]{1,2}|2[0-4][0-9]|25[0-5]), ?)(?:(0(?:\.[0-9]+)?|1(?:\.0+)?)) ?\)$/,
+    decoder: (encodedValue, target) => {
+        const channels = StringEncodedRGBA.regExp.exec(encodedValue);
+        if (channels === null) {
+            return false;
+        }
+        // For now we simply ignore alpha channel value.
+        // TODO: To be resolved with HARP-7517
+        target[0] = parseInt(channels[1], 10) / 255;
+        target[1] = parseInt(channels[2], 10) / 255;
+        target[2] = parseInt(channels[3], 10) / 255;
+        return true;
+    }
+};
+const StringEncodedHSL = {
     type: StringEncodedNumeralType.HSL,
     size: 3,
     // tslint:disable-next-line:max-line-length
-    regExp: /hsl\(((?:[0-9]|[1-9][0-9]|1[0-9]{1,2}|2[0-9]{1,2}|3[0-5][0-9]|360)), ?(?:([0-9]|[1-9][0-9]|100)%), ?(?:([0-9]|[1-9][0-9]|100)%)\)/,
-    decoder: (encodedValue) => {
-        const channels = exports.StringEncodedHSL.regExp.exec(encodedValue);
-        return [
-            parseInt(channels[1], 10) / 360,
-            parseInt(channels[2], 10) / 100,
-            parseInt(channels[3], 10) / 100
-        ];
+    regExp: /^hsl\( ?((?:[0-9]|[1-9][0-9]|1[0-9]{1,2}|2[0-9]{1,2}|3[0-5][0-9]|360)), ?(?:([0-9]|[1-9][0-9]|100)%), ?(?:([0-9]|[1-9][0-9]|100)%) ?\)$/,
+    decoder: (encodedValue, target) => {
+        const channels = StringEncodedHSL.regExp.exec(encodedValue);
+        if (channels === null) {
+            return false;
+        }
+        tmpColor.setHSL(parseInt(channels[1], 10) / 360, parseInt(channels[2], 10) / 100, parseInt(channels[3], 10) / 100);
+        target[0] = tmpColor.r;
+        target[1] = tmpColor.g;
+        target[2] = tmpColor.b;
+        return true;
     }
 };
 /**
- * Array of supported [[StringEncodedNumeralFormat]]s (inteded to be indexed with
+ * Array of all supported [[StringEncodedNumeralFormat]]s describing sizes, lengths and distances.
+ */
+exports.StringEncodedMetricFormats = [
+    StringEncodedMeters,
+    StringEncodedPixels
+];
+const StringEncodedMetricFormatMaxSize = exports.StringEncodedMetricFormats.reduce((a, b) => Math.max(a, b.size), 0);
+/**
+ * Array of all supported [[StringEncodedNumeralFormat]]s describing color data.
+ */
+exports.StringEncodedColorFormats = [
+    StringEncodedHex,
+    StringEncodedRGB,
+    StringEncodedRGBA,
+    StringEncodedHSL
+];
+const StringEncodedColorFormatMaxSize = exports.StringEncodedColorFormats.reduce((a, b) => Math.max(a, b.size), 0);
+/**
+ * Array of supported [[StringEncodedNumeralFormat]]s (intended to be indexed with
  * [[StringEncodedNumeralType]] enum).
  */
 exports.StringEncodedNumeralFormats = [
-    exports.StringEncodedMeters,
-    exports.StringEncodedPixels,
-    exports.StringEncodedHex,
-    exports.StringEncodedRGB,
-    exports.StringEncodedHSL
+    ...exports.StringEncodedMetricFormats,
+    ...exports.StringEncodedColorFormats
 ];
+exports.StringEncodedNumeralFormatMaxSize = Math.max(StringEncodedColorFormatMaxSize, StringEncodedMetricFormatMaxSize);
+const tmpBuffer = new Array(exports.StringEncodedNumeralFormatMaxSize);
+/**
+ * Parse string encoded numeral values using all known [[StringEncodedNumeralFormats]].
+ *
+ * @param numeral The string representing numeric value.
+ * @param pixelToMeters The ratio used to convert from meters to pixels (default 1.0).
+ * @returns Number parsed or __undefined__ if non of the numeral patterns matches the expression
+ * provided in [[numeral]].
+ */
+function parseStringEncodedNumeral(numeral, pixelToMeters = 1.0) {
+    let result;
+    const formatMatch = (format) => {
+        if (format.decoder(numeral, tmpBuffer)) {
+            switch (format.type) {
+                case StringEncodedNumeralType.Meters:
+                    result = tmpBuffer[0];
+                    break;
+                case StringEncodedNumeralType.Pixels:
+                    result = tmpBuffer[0] * pixelToMeters;
+                    break;
+                case StringEncodedNumeralType.Hex:
+                case StringEncodedNumeralType.RGB:
+                case StringEncodedNumeralType.RGBA:
+                case StringEncodedNumeralType.HSL:
+                    result = tmpColor.setRGB(tmpBuffer[0], tmpBuffer[1], tmpBuffer[2]).getHex();
+                    break;
+                default:
+                    result = tmpBuffer[0];
+                    break;
+            }
+            return true;
+        }
+        return false;
+    };
+    exports.StringEncodedNumeralFormats.some(formatMatch);
+    return result;
+}
+exports.parseStringEncodedNumeral = parseStringEncodedNumeral;
+/**
+ * Parse string encoded color value using all known [[StringEncodedColorFormats]].
+ *
+ * @param color The string encoded color expression (i.e. '#FFF', 'rgb(255, 0, 0)', etc.).
+ * @returns The color parsed or __undefined__ if non of the known representations matches
+ * the expression provided in [[color]].
+ */
+function parseStringEncodedColor(color) {
+    const matchedFormat = matchFormat(exports.StringEncodedColorFormats, color, tmpBuffer);
+    if (matchedFormat === undefined) {
+        return undefined;
+    }
+    switch (matchedFormat.type) {
+        case StringEncodedNumeralType.Hex:
+        case StringEncodedNumeralType.RGB:
+        case StringEncodedNumeralType.RGBA:
+        case StringEncodedNumeralType.HSL:
+            return tmpColor.setRGB(tmpBuffer[0], tmpBuffer[1], tmpBuffer[2]).getHex();
+        default:
+            return tmpBuffer[0];
+    }
+}
+exports.parseStringEncodedColor = parseStringEncodedColor;
+function matchFormat(formats, numeral, result) {
+    return formats.find(format => {
+        return format.decoder(numeral, result) ? true : false;
+    });
+}
 
 
 /***/ }),
@@ -8252,7 +8452,7 @@ const Theme_1 = __webpack_require__(/*! ./Theme */ "../harp-datasource-protocol/
 const logger = harp_utils_1.LoggerManager.instance.create("StyleSetEvaluator");
 const emptyTechniqueDescriptor = TechniqueDescriptor_1.mergeTechniqueDescriptor({});
 /**
- * [[ExprClassifier]] searches for usages of `$layer` in `when` conditions
+ * [[StyleConditionClassifier]] searches for usages of `$layer` in `when` conditions
  * associated with styling rules.
  *
  * @hidden
@@ -8441,7 +8641,6 @@ class StyleSetEvaluator {
      */
     getMatchingTechniques(env, layer, geometryType) {
         const result = [];
-        const styleStack = new Array();
         this.m_cachedResults.clear();
         const optimizedSubSetKey = this.m_tmpOptimizedSubSetKey;
         optimizedSubSetKey.set(layer, geometryType, env);
@@ -8453,12 +8652,7 @@ class StyleSetEvaluator {
         const previousLayer = this.changeLayer(typeof currentLayer === "string" ? currentLayer : undefined);
         const previousGeometryType = this.changeGeometryType(typeof currentGeometryType === "string" ? currentGeometryType : undefined);
         for (const currStyle of searchedStyleSet) {
-            if (styleStack.length !== 0) {
-                this.changeLayer(previousLayer); // restore the layer
-                this.changeGeometryType(previousGeometryType); // restore the geometryType
-                throw new Error("Internal error: style stack cleanup failed");
-            }
-            if (this.processStyle(env, styleStack, currStyle, result)) {
+            if (this.processStyle(env, currStyle, result)) {
                 break;
             }
         }
@@ -8575,9 +8769,6 @@ class StyleSetEvaluator {
                 logger.log("failed to evaluate expression", JSON.stringify(style.when), "error", String(err));
             }
         }
-        if (Array.isArray(style.styles)) {
-            style.styles.forEach(nestedStyle => this.compileStyle(nestedStyle));
-        }
     }
     /**
      * Process a style (and its sub-styles) hierarchically to look for the technique that fits the
@@ -8586,14 +8777,13 @@ class StyleSetEvaluator {
      *
      * @param env The objects environment, i.e. the attributes that are relevant for its
      *            representation.
-     * @param styleStack Stack of styles containing the hierarchy of styles up to this point.
      * @param style Current style (could also be top of stack).
      * @param result The array of resulting techniques. There may be more than one technique per
      *               object, resulting in multiple graphical objects for representation.
      * @returns `true` if style has been found and processing is finished. `false` if not found, or
      *          more than one technique should be applied.
      */
-    processStyle(env, styleStack, style, result) {
+    processStyle(env, style, result) {
         if (this.m_layer !== undefined &&
             style.layer !== undefined &&
             style.layer !== this.m_layer) {
@@ -8618,29 +8808,18 @@ class StyleSetEvaluator {
                 return false;
             }
         }
-        if (style.styles !== undefined) {
-            styleStack.push(style);
-            for (const currStyle of style.styles) {
-                if (this.processStyle(env, styleStack, currStyle, result)) {
-                    styleStack.pop();
-                    return true;
-                }
-            }
-            styleStack.pop();
-            return false;
-        }
         if (style.technique === undefined) {
             return false;
         }
         // we found a technique!
         if (style.technique !== "none") {
-            result.push(this.getTechniqueForStyleMatch(env, styleStack, style));
+            result.push(this.getTechniqueForStyleMatch(env, style));
         }
         // stop processing if "final" is set
         return style.final === true;
     }
-    getTechniqueForStyleMatch(env, styleStack, style) {
-        this.checkStyleDynamicAttributes(style, styleStack);
+    getTechniqueForStyleMatch(env, style) {
+        this.checkStyleDynamicAttributes(style);
         if (style._dynamicTechniques !== undefined) {
             const dynamicAttributes = this.evaluateTechniqueProperties(style, env);
             const key = this.getDynamicTechniqueKey(style, dynamicAttributes);
@@ -8672,7 +8851,7 @@ class StyleSetEvaluator {
             .join(":");
         return `${style._styleSetIndex}:${dynamicAttrKey}`;
     }
-    checkStyleDynamicAttributes(style, styleStack) {
+    checkStyleDynamicAttributes(style) {
         if (style._dynamicTechniqueAttributes !== undefined || style.technique === "none") {
             return;
         }
@@ -8724,27 +8903,20 @@ class StyleSetEvaluator {
                 targetStaticAttributes.push([attrName, attrValue]);
             }
         };
-        function processAttributes(style2) {
-            processAttribute("renderOrder", style2.renderOrder);
-            processAttribute("renderOrderOffset", style2.renderOrderOffset);
-            // TODO: What the heck is that !?
-            processAttribute("label", style2.labelProperty);
-            // line & solid-line secondaryRenderOrder should be generic attr
-            // TODO: maybe just warn and force move it to `attr` ?
-            processAttribute("secondaryRenderOrder", style2.secondaryRenderOrder);
-            if (style2.attr !== undefined) {
-                for (const attrName in style2.attr) {
-                    if (!style2.attr.hasOwnProperty(attrName)) {
-                        continue;
-                    }
-                    processAttribute(attrName, style2.attr[attrName]);
+        processAttribute("renderOrder", style.renderOrder);
+        // TODO: What the heck is that !?
+        processAttribute("label", style.labelProperty);
+        // line & solid-line secondaryRenderOrder should be generic attr
+        // TODO: maybe just warn and force move it to `attr` ?
+        processAttribute("secondaryRenderOrder", style.secondaryRenderOrder);
+        if (style.attr !== undefined) {
+            for (const attrName in style.attr) {
+                if (!style.attr.hasOwnProperty(attrName)) {
+                    continue;
                 }
+                processAttribute(attrName, style.attr[attrName]);
             }
         }
-        for (const parentStyle of styleStack) {
-            processAttributes(parentStyle);
-        }
-        processAttributes(style);
         if (dynamicTechniqueAttributes.length > 0) {
             style._dynamicTechniques = new Map();
         }
@@ -8802,54 +8974,12 @@ class StyleSetEvaluator {
 }
 exports.StyleSetEvaluator = StyleSetEvaluator;
 function computeDefaultRenderOrder(styleSet) {
-    const options = {
-        techniqueRenderOrder: 0,
-        styleSetIndex: 0,
-        renderOrderBiasGroups: new Map()
-    };
+    let techniqueRenderOrder = 0;
+    let styleSetIndex = 0;
     for (const style of styleSet) {
-        computeStyleDefaultRenderOrder(style, options);
-    }
-}
-function computeStyleDefaultRenderOrder(style, state) {
-    if (style.renderOrderBiasGroup !== undefined) {
-        const renderOrderBiasGroupOrder = style.renderOrderBiasGroup
-            ? state.renderOrderBiasGroups.get(style.renderOrderBiasGroup)
-            : undefined;
-        if (style.renderOrderBiasRange !== undefined && renderOrderBiasGroupOrder === undefined) {
-            if (style.renderOrder !== undefined) {
-                logger.warn("WARN: style.renderOrder will be overridden if " +
-                    "renderOrderBiasGroup is set:", style);
-            }
-            const [minRange, maxRange] = style.renderOrderBiasRange;
-            style.renderOrder =
-                minRange < 0
-                    ? state.techniqueRenderOrder + Math.abs(minRange)
-                    : state.techniqueRenderOrder;
-            state.techniqueRenderOrder += Math.abs(minRange) + maxRange;
-            if (style.renderOrderBiasGroup) {
-                state.renderOrderBiasGroups.set(style.renderOrderBiasGroup, style.renderOrder);
-            }
-            state.techniqueRenderOrder++;
-        }
-        else if (renderOrderBiasGroupOrder) {
-            if (style.renderOrder !== undefined) {
-                logger.warn("WARN: style.renderOrder will be overridden if " +
-                    "renderOrderBiasGroup is set:", style);
-            }
-            style.renderOrder = renderOrderBiasGroupOrder;
-        }
-    }
-    // search through child styles
-    if (style.styles !== undefined) {
-        for (const currStyle of style.styles) {
-            computeStyleDefaultRenderOrder(currStyle, state);
-        }
-    }
-    else {
-        style._styleSetIndex = state.styleSetIndex++;
+        style._styleSetIndex = styleSetIndex++;
         if (style.technique !== undefined && style.renderOrder === undefined) {
-            style.renderOrder = state.techniqueRenderOrder++;
+            style.renderOrder = techniqueRenderOrder++;
         }
     }
 }
@@ -8873,11 +9003,7 @@ function resolveStyleReferences(style, definitions) {
         // instantiate the style
         return resolveStyleReferences(def, definitions);
     }
-    const styles = style.styles &&
-        style.styles
-            .map(subStyle => resolveStyleReferences(subStyle, definitions))
-            .filter(subStyle => subStyle !== undefined);
-    return Object.assign(Object.assign({}, style), { styles });
+    return Object.assign({}, style);
 }
 /**
  * Create transferable representation of dynamic technique.
@@ -9326,22 +9452,14 @@ exports.solidLineTechniqueDescriptor = TechniqueDescriptor_1.mergeTechniqueDescr
         transparent: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
         lineWidth: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
         secondaryWidth: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
-        secondaryColor: TechniqueDescriptor_1.AttrScope.TechniqueRendering
-    }
-});
-exports.techniqueDescriptors["solid-line"] = exports.solidLineTechniqueDescriptor;
-exports.dashedLineTechniqueDescriptor = TechniqueDescriptor_1.mergeTechniqueDescriptor(exports.baseTechniqueParamsDescriptor, polygonalTechniqueDescriptor, {
-    attrScopes: {
-        color: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
-        clipping: TechniqueDescriptor_1.AttrScope.TechniqueGeometry,
-        opacity: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
-        transparent: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
-        lineWidth: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
+        secondaryColor: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
         dashSize: TechniqueDescriptor_1.AttrScope.TechniqueRendering,
         gapSize: TechniqueDescriptor_1.AttrScope.TechniqueRendering
     }
 });
-exports.techniqueDescriptors["dashed-line"] = exports.dashedLineTechniqueDescriptor;
+exports.techniqueDescriptors["solid-line"] = exports.solidLineTechniqueDescriptor;
+// TODO: Remove deprecated "dashed-line" support in future releases.
+exports.techniqueDescriptors["dashed-line"] = exports.solidLineTechniqueDescriptor;
 exports.lineTechniqueDescriptor = TechniqueDescriptor_1.mergeTechniqueDescriptor(exports.baseTechniqueParamsDescriptor, {
     attrScopes: {
         // TODO, check, which are really dynamic !
@@ -9492,13 +9610,6 @@ function isLineMarkerTechnique(technique) {
 }
 exports.isLineMarkerTechnique = isLineMarkerTechnique;
 /**
- * Type guard to check if an object is an instance of [[DashedLineTechnique]].
- */
-function isDashedLineTechnique(technique) {
-    return technique.name === "dashed-line";
-}
-exports.isDashedLineTechnique = isDashedLineTechnique;
-/**
  * Type guard to check if an object is an instance of [[LineTechnique]].
  */
 function isLineTechnique(technique) {
@@ -9509,7 +9620,7 @@ exports.isLineTechnique = isLineTechnique;
  * Type guard to check if an object is an instance of [[SolidLineTechnique]].
  */
 function isSolidLineTechnique(technique) {
-    return technique.name === "solid-line";
+    return technique.name === "solid-line" || technique.name === "dashed-line";
 }
 exports.isSolidLineTechnique = isSolidLineTechnique;
 /**
@@ -9753,13 +9864,6 @@ class ThemeVisitor {
             if (visitFunc(style)) {
                 return true;
             }
-            if (style.styles !== undefined) {
-                for (const currStyle of style.styles) {
-                    if (visit(currStyle)) {
-                        return true;
-                    }
-                }
-            }
             return false;
         };
         if (this.theme.styles !== undefined) {
@@ -9855,12 +9959,26 @@ var ThreeBufferUtils;
             vertexAttribute.name = name;
             vertexAttributes.push(vertexAttribute);
         }
-        const index = fromThreeBufferAttribute(bufferGeometry.index);
+        const index = bufferGeometry.index !== null
+            ? fromThreeBufferAttribute(bufferGeometry.index)
+            : undefined;
+        let count = 0;
+        if (index !== undefined) {
+            count = bufferGeometry.index.count;
+        }
+        else {
+            // If there is no index buffer, try to deduce the count from the position attribute.
+            const posAttr = bufferGeometry.attributes.position;
+            if (posAttr === undefined) {
+                throw new Error("Missing position attibute to deduce item count");
+            }
+            count = posAttr.count;
+        }
         return {
             type: DecodedTile_1.GeometryType.Unspecified,
             vertexAttributes,
             index,
-            groups: [{ start: 0, count: bufferGeometry.index.count, technique: techniqueIndex }]
+            groups: [{ start: 0, count, technique: techniqueIndex }]
         };
     }
     ThreeBufferUtils.fromThreeBufferGeometry = fromThreeBufferGeometry;
@@ -10976,16 +11094,38 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const THREE = __webpack_require__(/*! three */ "three");
 const tmpColor = new THREE.Color();
 const operators = {
+    rgba: {
+        call: (context, call) => {
+            const r = context.evaluate(call.args[0]);
+            const g = context.evaluate(call.args[1]);
+            const b = context.evaluate(call.args[2]);
+            const a = context.evaluate(call.args[3]);
+            if (typeof r === "number" &&
+                typeof g === "number" &&
+                typeof b === "number" &&
+                typeof a === "number" &&
+                r >= 0 &&
+                g >= 0 &&
+                b >= 0 &&
+                a >= 0 &&
+                a <= 1) {
+                return rgbaToString(r, g, b, a);
+            }
+            throw new Error(`unknown color 'rgba(${r},${g},${b},${a})'`);
+        }
+    },
     rgb: {
         call: (context, call) => {
             const r = context.evaluate(call.args[0]);
             const g = context.evaluate(call.args[1]);
             const b = context.evaluate(call.args[2]);
-            if (typeof r === "number" && typeof g === "number" && typeof b === "number") {
-                return ("#" +
-                    tmpColor
-                        .setRGB(THREE.Math.clamp(r, 0, 255) / 255, THREE.Math.clamp(g, 0, 255) / 255, THREE.Math.clamp(b, 0, 255) / 255)
-                        .getHexString());
+            if (typeof r === "number" &&
+                typeof g === "number" &&
+                typeof b === "number" &&
+                r >= 0 &&
+                g >= 0 &&
+                b >= 0) {
+                return rgbaToString(r, g, b);
             }
             throw new Error(`unknown color 'rgb(${r},${g},${b})'`);
         }
@@ -11001,12 +11141,23 @@ const operators = {
                 h >= 0 &&
                 s >= 0 &&
                 l >= 0) {
-                return `hsl(${h},${Math.round(s)}%,${Math.round(l)}%)`;
+                return hslToString(h, s, l);
             }
             throw new Error(`unknown color 'hsl(${h},${s}%,${l}%)'`);
         }
     }
 };
+function rgbaToString(r, g, b, a) {
+    // For now we simply ignore alpha component from rgba(...) expressions.
+    // TODO: To be resolved with HARP-7517.
+    return ("#" +
+        tmpColor
+            .setRGB(THREE.Math.clamp(r, 0, 255) / 255, THREE.Math.clamp(g, 0, 255) / 255, THREE.Math.clamp(b, 0, 255) / 255)
+            .getHexString());
+}
+function hslToString(h, s, l) {
+    return `hsl(${h},${Math.round(s)}%,${Math.round(l)}%)`;
+}
 exports.ColorOperators = operators;
 
 
@@ -11148,6 +11299,36 @@ function conditionalCast(context, type, args) {
     } // switch
 }
 const operators = {
+    all: {
+        call: (context, call) => {
+            for (const childExpr of call.args) {
+                if (!context.evaluate(childExpr)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    },
+    any: {
+        call: (context, call) => {
+            for (const childExpr of call.args) {
+                if (context.evaluate(childExpr)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    },
+    none: {
+        call: (context, call) => {
+            for (const childExpr of call.args) {
+                if (context.evaluate(childExpr)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    },
     boolean: {
         call: (context, call) => {
             return conditionalCast(context, "boolean", call.args);
@@ -11228,6 +11409,15 @@ function step(context, args) {
     return context.evaluate(args[index * 2 + 1]);
 }
 const operators = {
+    ppi: {
+        call: (context, call) => {
+            const ppi = context.env.lookup("$ppi");
+            if (typeof ppi === "number") {
+                return ppi;
+            }
+            return 72;
+        }
+    },
     zoom: {
         call: (context, call) => {
             if (context.scope === Expr_1.ExprScope.Condition) {
@@ -11300,6 +11490,9 @@ const operators = {
             if (result === undefined) {
                 throw new Error("failed to create interpolator");
             }
+            if (context.scope === Expr_1.ExprScope.Dynamic) {
+                return InterpolatedProperty_1.getPropertyValue(result, context.env);
+            }
             return result;
         }
     },
@@ -11309,7 +11502,7 @@ const operators = {
                 throw new Error("expected the input of the 'step' operator");
             }
             const input = call.args[0];
-            if (context.scope === Expr_1.ExprScope.Value &&
+            if ((context.scope === Expr_1.ExprScope.Value || context.scope === Expr_1.ExprScope.Dynamic) &&
                 input instanceof Expr_1.CallExpr &&
                 input.op === "zoom") {
                 if (call.args.length < 3 || call.args.length % 2) {
@@ -11338,6 +11531,9 @@ const operators = {
                 });
                 if (interpolation === undefined) {
                     throw new Error("failed to create interpolator");
+                }
+                if (context.scope === Expr_1.ExprScope.Dynamic) {
+                    return InterpolatedProperty_1.getPropertyValue(interpolation, context.env);
                 }
                 return interpolation;
             }
@@ -12040,8 +12236,6 @@ class GeoJsonGeometryCreator {
                     geometries.geometries.push(this.createPointGeometry(geometryData, techniqueIndex));
                     break;
                 case "solid-line":
-                    geometries.geometries.push(this.createSolidLineGeometry(geometryData, techniqueIndex));
-                    break;
                 case "dashed-line":
                     geometries.geometries.push(this.createSolidLineGeometry(geometryData, techniqueIndex));
                     break;
@@ -12476,9 +12670,6 @@ class GeoJsonParser {
                     else if (harp_datasource_protocol_1.isTextTechnique(technique)) {
                         this.processLineLabels([feature.geometry.coordinates], center, projection, techniqueIndex, technique.label, buffers.textPathGeometryBuffer, feature.properties);
                     }
-                    else if (harp_datasource_protocol_1.isDashedLineTechnique(technique)) {
-                        this.processDashedLines(extendedTile, [feature.geometry.coordinates], center, projection, techniqueIndex, styleSetEvaluator, buffers.geometryBuffer, feature.id, feature.properties);
-                    }
                 }
                 break;
             case "MultiLineString":
@@ -12546,38 +12737,6 @@ class GeoJsonParser {
     static processLines(extendedTile, lines, center, projection, techniqueIndex, styleSetEvaluator, geometryBuffer, featureId, geojsonProperties) {
         const buffer = this.findOrCreateGeometryBuffer(techniqueIndex, geometryBuffer);
         buffer.type = "solid-line";
-        for (const line of lines) {
-            buffer.lines.geojsonProperties.push(geojsonProperties);
-            const vertices = [];
-            for (const point of line) {
-                if (point === null || point[0] === null || point[0] === undefined) {
-                    return;
-                }
-                this.m_cached_geoCoord.latitude = point[1];
-                this.m_cached_geoCoord.longitude = point[0];
-                projection
-                    .projectPoint(this.m_cached_geoCoord, this.m_cached_worldCoord)
-                    .sub(center);
-                vertices.push(this.m_cached_worldCoord.x, this.m_cached_worldCoord.y, this.m_cached_worldCoord.z);
-            }
-            buffer.lines.vertices.push(vertices);
-        }
-        const featureDetails = {};
-        if (featureId !== undefined) {
-            featureDetails.featureId = featureId;
-        }
-        const env = new index_decoder_1.MapEnv(Object.assign({ type: "line" }, featureDetails));
-        const techniques = styleSetEvaluator.getMatchingTechniques(env);
-        const featureIdNumber = 0; //geojsonTile do not have an integer for the featureId. Use 0.
-        if (buffer.lines.vertices.length !== buffer.lines.geojsonProperties.length) {
-            logger.log("The amount of lines and the amount of geo properties has to be the same");
-            return;
-        }
-        this.addTileInfo(extendedTile, techniques, buffer.lines.vertices, featureIdNumber, env, buffer.lines.geojsonProperties);
-    }
-    static processDashedLines(extendedTile, lines, center, projection, techniqueIndex, styleSetEvaluator, geometryBuffer, featureId, geojsonProperties) {
-        const buffer = this.findOrCreateGeometryBuffer(techniqueIndex, geometryBuffer);
-        buffer.type = "dashed-line";
         for (const line of lines) {
             buffer.lines.geojsonProperties.push(geojsonProperties);
             const vertices = [];
@@ -16502,25 +16661,27 @@ const SEGMENT_OFFSET = 0.1;
 /**
  * Declares all the vertex attributes used for rendering a line using the [[SolidLineMaterial]].
  */
-/** Optional normal and uv coordinates. */
-const NORMAL_UV_VERTEX_ATTRIBUTES = {
-    attributes: [
-        { name: "uv", itemSize: 2, offset: 13 },
-        { name: "normal", itemSize: 3, offset: 15 }
-    ],
-    stride: 5
-};
 /** Base line vertex attributes. */
 const LINE_VERTEX_ATTRIBUTES = {
-    // The "extrusionCoord" its a vec3. Represents UV coordinates + line length for the third
-    // component.
     attributes: [
+        // The "extrusionCoord" is a vec4 which represents:
+        // xy: Extrusion coordinates
+        // sign(xy): Extrusion direction
+        // z: Line length
         { name: "extrusionCoord", itemSize: 3, offset: 0 },
         { name: "position", itemSize: 3, offset: 3 },
         { name: "tangent", itemSize: 3, offset: 6 },
         { name: "bitangent", itemSize: 4, offset: 9 }
     ],
     stride: 13
+};
+/** Optional normal and uv coordinates. */
+const NORMAL_UV_VERTEX_ATTRIBUTES = {
+    attributes: [
+        { name: "uv", itemSize: 2, offset: LINE_VERTEX_ATTRIBUTES.stride },
+        { name: "normal", itemSize: 3, offset: LINE_VERTEX_ATTRIBUTES.stride + 2 }
+    ],
+    stride: 5
 };
 /** Base line vertex attributes plus normals and uv coordinates. */
 const LINE_VERTEX_ATTRIBUTES_NUV = {
@@ -16573,12 +16734,13 @@ function getVertexDescriptor(hasNormalsAndUvs, highPrecision) {
  *
  * @param center Center of the polyline.
  * @param polyline Array of `numbers` describing a polyline.
+ * @param offsets Array of `numbers` representing line segment offsets.
  * @param uvs Array of `numbers` representing texture coordinates.
  * @param colors Array of `numbers` describing a polyline's colors.
  * @param geometry [[LineGeometry]] object used to store the vertex and index attributes.
  * @param highPrecision If `true` will create high-precision vertex information.
  */
-function createLineGeometry(center, polyline, uvs, colors, geometry = new LineGeometry(), highPrecision = false) {
+function createLineGeometry(center, polyline, offsets, uvs, colors, geometry = new LineGeometry(), highPrecision = false) {
     if (polyline.length === 0) {
         return geometry;
     }
@@ -16587,8 +16749,10 @@ function createLineGeometry(center, polyline, uvs, colors, geometry = new LineGe
     const segments = new Array(pointCount);
     const tangents = new Array(polyline.length - 3);
     const baseVertex = geometry.vertices.length / stride;
+    const hasSegmentOffsets = offsets !== undefined && offsets.length > 0;
     const hasTexCoords = uvs !== undefined && uvs.length > 0;
     const vertexColors = colors !== undefined && colors.length && polyline.length;
+    harp_utils_1.assert(!hasSegmentOffsets || offsets.length === pointCount);
     harp_utils_1.assert(!hasTexCoords || uvs.length / 2 === pointCount);
     harp_utils_1.assert(!vertexColors || colors.length === polyline.length);
     // Compute segments and tangents.
@@ -16607,7 +16771,16 @@ function createLineGeometry(center, polyline, uvs, colors, geometry = new LineGe
         sum = sum + len;
         segments[i + 1] = sum;
     }
-    const lineLength = segments[segments.length - 1];
+    const lineCoverage = hasSegmentOffsets
+        ? Math.abs(offsets[offsets.length - 1] - offsets[0])
+        : 1.0;
+    const lineLength = segments[segments.length - 1] / lineCoverage;
+    // Override the segments if offsets are explicitly provided.
+    if (hasSegmentOffsets) {
+        for (let i = 0; i < pointCount; ++i) {
+            segments[i] = offsets[i] * lineLength + SEGMENT_OFFSET;
+        }
+    }
     // Check if we're working with a closed line.
     let isClosed = true;
     for (let j = 0; j < 3; ++j) {
@@ -16734,9 +16907,9 @@ class LineGroup {
      */
     static createGeometry(vertices, colors, indices, geometry, hasNormalsAndUvs = false, highPrecision = false, isSimple = false) {
         if (isSimple) {
-            geometry.addAttribute("position", new THREE.BufferAttribute(new Float32Array(vertices), 3));
+            geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(vertices), 3));
             if (colors.length === vertices.length) {
-                geometry.addAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
+                geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
             }
             geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
             return geometry;
@@ -16746,10 +16919,10 @@ class LineGroup {
             const buffer = new THREE.InterleavedBuffer(new Float32Array(vertices), vertexDescriptor.stride);
             vertexDescriptor.attributes.forEach(descr => {
                 const attribute = new THREE.InterleavedBufferAttribute(buffer, descr.itemSize, descr.offset, false);
-                geometry.addAttribute(descr.name, attribute);
+                geometry.setAttribute(descr.name, attribute);
             });
             if (colors.length === vertices.length) {
-                geometry.addAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
+                geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
             }
             geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
             return geometry;
@@ -16768,13 +16941,14 @@ class LineGroup {
      *
      * @param center World center of the provided points.
      * @param points Sequence of (x,y,z) coordinates.
+     * @param offsets Sequence of line segment offsets.
      * @param uvs Sequence of (u,v) texture coordinates.
      * @param colors Sequence of (r,g,b) color components.
      */
-    add(center, points, uvs, colors) {
+    add(center, points, offsets, uvs, colors) {
         if (!this.isSimple) {
             harp_utils_1.assert(!this.hasNormalsAndUvs || uvs !== undefined);
-            createLineGeometry(center, points, uvs, colors, this.m_geometry, this.highPrecision);
+            createLineGeometry(center, points, offsets, uvs, colors, this.m_geometry, this.highPrecision);
         }
         else {
             createSimpleLineGeometry(points, colors, this.m_geometry);
@@ -17108,7 +17282,7 @@ class GeoJsonTiler {
         else {
             input = input;
         }
-        this.indexes.set(indexId, geojsonvt(input, {
+        const index = geojsonvt(input, {
             maxZoom: 20,
             indexMaxZoom: 5,
             indexMaxPoints: 100000,
@@ -17119,7 +17293,9 @@ class GeoJsonTiler {
             promoteId: null,
             generateId: true,
             debug: 0 // logging level (0, 1 or 2)
-        }));
+        });
+        index.geojson = input;
+        this.indexes.set(indexId, index);
     }
     async getTile(indexId, tileKey) {
         const index = this.indexes.get(indexId);
@@ -17129,8 +17305,27 @@ class GeoJsonTiler {
         const tile = index.getTile(tileKey.level, tileKey.column, tileKey.row);
         if (tile !== null) {
             tile.layer = indexId;
+            for (const feature of tile.features) {
+                feature.originalGeometry = this.getOriginalGeometry(feature, index.geojson);
+            }
         }
         return tile || {};
+    }
+    getOriginalGeometry(feature, geojson) {
+        switch (geojson.type) {
+            case "Point":
+            case "MultiPoint":
+            case "LineString":
+            case "MultiLineString":
+            case "Polygon":
+            case "MultiPolygon":
+            case "GeometryCollection":
+                return geojson;
+            case "Feature":
+                return geojson.geometry;
+            case "FeatureCollection":
+                return geojson.features[feature.id].geometry;
+        }
     }
 }
 exports.GeoJsonTiler = GeoJsonTiler;
@@ -18466,12 +18661,10 @@ class OmvGenericFeatureFilter {
     constructor(description) {
         this.description = description;
         if (this.description.kindsToProcess.length > 0) {
-            this.enabledKinds = new harp_datasource_protocol_1.GeometryKindSet(this.description
-                .kindsToProcess);
+            this.enabledKinds = new harp_datasource_protocol_1.GeometryKindSet(this.description.kindsToProcess);
         }
         if (this.description.kindsToIgnore.length > 0) {
-            this.disabledKinds = new harp_datasource_protocol_1.GeometryKindSet(this.description
-                .kindsToIgnore);
+            this.disabledKinds = new harp_datasource_protocol_1.GeometryKindSet(this.description.kindsToIgnore);
         }
     }
     static matchLayer(layer, layerItems, level) {
@@ -18682,9 +18875,16 @@ const tempRoofDisp = new THREE.Vector3();
 const tmpV2 = new THREE.Vector2();
 const tmpV2r = new THREE.Vector2();
 const tmpV3 = new THREE.Vector3();
+const tmpV3r = new THREE.Vector3();
 const tempP0 = new THREE.Vector2();
 const tempP1 = new THREE.Vector2();
 const tempPreviousTangent = new THREE.Vector2();
+const tmpPointA = new THREE.Vector3();
+const tmpPointB = new THREE.Vector3();
+const tmpPointC = new THREE.Vector3();
+const tmpPointD = new THREE.Vector3();
+const tmpPointE = new THREE.Vector3();
+const tmpLine = new THREE.Line3();
 /**
  * Height buildings take whenever no height-data is present. Used to avoid z-fighting and other
  * graphics artifacts.
@@ -18778,8 +18978,8 @@ class OmvDecodedTileEmitter {
         this.m_poiGeometries = [];
         this.m_simpleLines = [];
         this.m_solidLines = [];
-        this.m_dashedLines = [];
         this.m_sources = [];
+        this.m_maxGeometryHeight = 0;
     }
     get projection() {
         return this.m_decodeInfo.targetProjection;
@@ -18842,13 +19042,18 @@ class OmvDecodedTileEmitter {
                 }
                 // Always store the position, otherwise the following POIs will be
                 // misplaced.
-                OmvUtils_1.webMercatorTile2TargetWorld(extents, this.m_decodeInfo, pos, tmpV3);
+                if (shouldCreateTextGeometries) {
+                    OmvUtils_1.webMercatorTile2TargetWorld(extents, this.m_decodeInfo, pos, tmpV3);
+                }
+                else {
+                    OmvUtils_1.webMercatorTile2TargetTile(extents, this.m_decodeInfo, pos, tmpV3);
+                }
                 positions.push(tmpV3.x, tmpV3.y, tmpV3.z);
                 if (this.m_gatherFeatureIds) {
                     featureIds.push(featureId);
                     objInfos.push(env.entries);
                 }
-                if (harp_datasource_protocol_1.isPoiTechnique) {
+                if (wantsPoi) {
                     if (imageTexture === undefined) {
                         imageTextures.push(INVALID_ARRAY_INDEX);
                     }
@@ -18873,14 +19078,17 @@ class OmvDecodedTileEmitter {
     processLineFeature(layer, extents, geometry, context, techniques, featureId) {
         const env = context.env;
         this.processFeatureCommon(env);
-        const lines = [];
+        const localLines = []; // lines in target tile space.
+        const worldLines = []; // lines in world space.
         const uvs = [];
+        const offsets = [];
         const { projectedTileBounds } = this.m_decodeInfo;
         const tileWidth = projectedTileBounds.max.x - projectedTileBounds.min.x;
         const tileHeight = projectedTileBounds.max.y - projectedTileBounds.min.y;
         const tileSizeInMeters = Math.max(tileWidth, tileHeight);
         let computeTexCoords;
         let texCoordinateType;
+        const hasUntiledLines = geometry[0].untiledPositions !== undefined;
         // Check if any of the techniques needs texture coordinates
         for (const technique of techniques) {
             if (technique === undefined) {
@@ -18897,18 +19105,45 @@ class OmvDecodedTileEmitter {
             }
         }
         for (const polyline of geometry) {
-            const line = [];
+            // Compute the world position of the untiled line and its distance to the origin of the
+            // line to properly join lines.
+            const untiledLine = [];
+            let lineDist = 0;
+            if (hasUntiledLines) {
+                this.m_decodeInfo.targetProjection.projectPoint(polyline.untiledPositions[0], tmpV3r);
+                polyline.untiledPositions.forEach(pos => {
+                    // Calculate the distance to the next unnormalized point.
+                    this.m_decodeInfo.targetProjection.projectPoint(pos, tmpV3);
+                    lineDist += tmpV3.distanceTo(tmpV3r);
+                    tmpV3r.copy(tmpV3);
+                    // Pushed the normalized point for line matching.
+                    this.m_decodeInfo.targetProjection.projectPoint(pos.normalized(), tmpV3);
+                    untiledLine.push(tmpV3.x, tmpV3.y, tmpV3.z, lineDist);
+                });
+            }
+            const localLine = [];
+            const worldLine = [];
             const lineUvs = [];
+            const lineOffsets = [];
             polyline.positions.forEach(pos => {
                 OmvUtils_1.webMercatorTile2TargetWorld(extents, this.m_decodeInfo, pos, tmpV3);
-                line.push(tmpV3.x, tmpV3.y, tmpV3.z);
+                worldLine.push(tmpV3.x, tmpV3.y, tmpV3.z);
                 if (computeTexCoords) {
                     const { u, v } = computeTexCoords(pos, extents);
                     lineUvs.push(u, v);
                 }
+                if (hasUntiledLines) {
+                    // Find where in the [0...1] range relative to the line our current vertex lies.
+                    const offset = this.findRelativePositionInLine(tmpV3, untiledLine) / lineDist;
+                    lineOffsets.push(offset);
+                }
+                tmpV3.sub(this.m_decodeInfo.center);
+                localLine.push(tmpV3.x, tmpV3.y, tmpV3.z);
             });
-            lines.push(line);
+            localLines.push(localLine);
+            worldLines.push(worldLine);
             uvs.push(lineUvs);
+            offsets.push(lineOffsets);
         }
         const wantCircle = this.m_decodeInfo.tileKey.level >= 11;
         for (const technique of techniques) {
@@ -18917,16 +19152,12 @@ class OmvDecodedTileEmitter {
             }
             const techniqueIndex = technique._index;
             const techniqueName = technique.name;
-            if (harp_datasource_protocol_1.isLineTechnique(technique) ||
-                harp_datasource_protocol_1.isSolidLineTechnique(technique) ||
-                harp_datasource_protocol_1.isDashedLineTechnique(technique)) {
+            if (harp_datasource_protocol_1.isLineTechnique(technique) || harp_datasource_protocol_1.isSolidLineTechnique(technique)) {
                 const lineGeometry = harp_datasource_protocol_1.isLineTechnique(technique)
                     ? this.m_simpleLines
-                    : harp_datasource_protocol_1.isSolidLineTechnique(technique)
-                        ? this.m_solidLines
-                        : this.m_dashedLines;
+                    : this.m_solidLines;
                 const lineType = harp_datasource_protocol_1.isLineTechnique(technique) ? LineType.Simple : LineType.Complex;
-                this.applyLineTechnique(lineGeometry, technique, techniqueIndex, this.m_gatherFeatureIds, lineType, featureId, lines, context, this.getTextureCoordinateType(technique) ? uvs : undefined);
+                this.applyLineTechnique(lineGeometry, technique, techniqueIndex, this.m_gatherFeatureIds, lineType, featureId, localLines, context, this.getTextureCoordinateType(technique) ? uvs : undefined, hasUntiledLines ? offsets : undefined);
             }
             else if (harp_datasource_protocol_1.isTextTechnique(technique) ||
                 harp_datasource_protocol_1.isPoiTechnique(technique) ||
@@ -18947,10 +19178,10 @@ class OmvDecodedTileEmitter {
                         metersPerPixel *
                         SIZE_ESTIMATION_FACTOR;
                     const minEstimatedLabelLengthSqr = minEstimatedLabelLength * minEstimatedLabelLength;
-                    validLines = this.splitJaggyLines(lines, minEstimatedLabelLengthSqr, MAX_CORNER_ANGLE);
+                    validLines = this.splitJaggyLines(worldLines, minEstimatedLabelLengthSqr, MAX_CORNER_ANGLE);
                 }
                 else {
-                    validLines = lines;
+                    validLines = worldLines;
                 }
                 if (validLines.length === 0) {
                     continue;
@@ -19006,13 +19237,10 @@ class OmvDecodedTileEmitter {
                 }
             }
             else if (harp_datasource_protocol_1.isLabelRejectionLineTechnique(technique)) {
-                const point = new THREE.Vector3();
-                for (const path of lines) {
+                for (const path of worldLines) {
                     const worldPath = [];
                     for (let i = 0; i < path.length; i += 3) {
-                        point.set(path[i], path[i + 1], path[i + 2]);
-                        point.add(this.m_decodeInfo.center);
-                        worldPath.push(point.clone());
+                        worldPath.push(new THREE.Vector3().fromArray(path, i));
                     }
                     this.m_pathGeometries.push({
                         path: worldPath
@@ -19032,7 +19260,7 @@ class OmvDecodedTileEmitter {
                 }
                 const techniqueCaps = TechniqueAttr_1.evaluateTechniqueAttr(context, technique.caps, "Circle");
                 const addCircle = wantCircle && techniqueCaps === "Circle";
-                lines.forEach(aLine => {
+                localLines.forEach(aLine => {
                     TriangulateLines_1.triangulateLine(aLine, lineWidth, positions, indices, addCircle);
                     if (this.m_gatherFeatureIds) {
                         featureIds.push(featureId);
@@ -19092,18 +19320,12 @@ class OmvDecodedTileEmitter {
                 }
                 polygons.push(rings);
             }
-            const isLine = harp_datasource_protocol_1.isSolidLineTechnique(technique) ||
-                harp_datasource_protocol_1.isDashedLineTechnique(technique) ||
-                harp_datasource_protocol_1.isLineTechnique(technique);
+            const isLine = harp_datasource_protocol_1.isSolidLineTechnique(technique) || harp_datasource_protocol_1.isLineTechnique(technique);
             if (isPolygon) {
                 this.applyPolygonTechnique(polygons, technique, techniqueIndex, featureId, context, extents);
             }
             else if (isLine) {
-                const lineGeometry = technique.name === "line"
-                    ? this.m_simpleLines
-                    : technique.name === "solid-line"
-                        ? this.m_solidLines
-                        : this.m_dashedLines;
+                const lineGeometry = technique.name === "line" ? this.m_simpleLines : this.m_solidLines;
                 const lineType = technique.name === "line" ? LineType.Simple : LineType.Complex;
                 polygons.forEach(rings => {
                     const lines = [];
@@ -19125,11 +19347,11 @@ class OmvDecodedTileEmitter {
                                 line = [];
                             }
                             else if (isOutline && line.length === 0) {
-                                OmvUtils_1.webMercatorTile2TargetWorld(extents, this.m_decodeInfo, tmpV2.set(currX, currY), tmpV3);
+                                OmvUtils_1.webMercatorTile2TargetTile(extents, this.m_decodeInfo, tmpV2.set(currX, currY), tmpV3);
                                 line.push(tmpV3.x, tmpV3.y, tmpV3.z);
                             }
                             if (isOutline) {
-                                OmvUtils_1.webMercatorTile2TargetWorld(extents, this.m_decodeInfo, tmpV2.set(nextX, nextY), tmpV3);
+                                OmvUtils_1.webMercatorTile2TargetTile(extents, this.m_decodeInfo, tmpV2.set(nextX, nextY), tmpV3);
                                 line.push(tmpV3.x, tmpV3.y, tmpV3.z);
                             }
                         }
@@ -19154,7 +19376,6 @@ class OmvDecodedTileEmitter {
         this.createGeometries();
         this.processSimpleLines(this.m_simpleLines);
         this.processLines(this.m_solidLines);
-        this.processLines(this.m_dashedLines);
         const decodedTile = {
             techniques: this.m_styleSetEvaluator.decodedTechniques,
             geometries: this.m_geometries,
@@ -19175,6 +19396,7 @@ class OmvDecodedTileEmitter {
         if (this.m_sources.length !== 0) {
             decodedTile.copyrightHolderIds = this.m_sources;
         }
+        decodedTile.maxGeometryHeight = this.m_maxGeometryHeight;
         return decodedTile;
     }
     /**
@@ -19264,7 +19486,6 @@ class OmvDecodedTileEmitter {
         // used in elevation overlay.
         if ((harp_datasource_protocol_1.isFillTechnique(technique) ||
             harp_datasource_protocol_1.isSolidLineTechnique(technique) ||
-            harp_datasource_protocol_1.isDashedLineTechnique(technique) ||
             harp_datasource_protocol_1.isExtrudedPolygonTechnique(technique)) &&
             this.m_enableElevationOverlay) {
             return harp_datasource_protocol_1.TextureCoordinateType.TileSpace;
@@ -19288,7 +19509,7 @@ class OmvDecodedTileEmitter {
                 }
                 : undefined;
     }
-    applyLineTechnique(linesGeometry, technique, techniqueIndex, gatherFeatureIds, lineType = LineType.Complex, featureId, lines, context, uvs) {
+    applyLineTechnique(linesGeometry, technique, techniqueIndex, gatherFeatureIds, lineType = LineType.Complex, featureId, lines, context, uvs, offsets) {
         const renderOrderOffset = TechniqueAttr_1.evaluateTechniqueAttr(context, technique.renderOrderOffset, 0);
         let lineGroup;
         const lineGroupGeometries = linesGeometry.find(aLine => {
@@ -19324,7 +19545,8 @@ class OmvDecodedTileEmitter {
         }
         let i = 0;
         lines.forEach(aLine => {
-            lineGroup.add(this.m_decodeInfo.center, aLine, uvs ? uvs[i++] : undefined);
+            lineGroup.add(this.m_decodeInfo.center, aLine, offsets ? offsets[i] : undefined, uvs ? uvs[i] : undefined);
+            i++;
         });
     }
     applyPolygonTechnique(polygons, technique, techniqueIndex, featureId, context, extents) {
@@ -19467,16 +19689,16 @@ class OmvDecodedTileEmitter {
                         }
                         // Create the temporary geometry used for subdivision.
                         const posAttr = new THREE.BufferAttribute(new Float32Array(positionArray), 3);
-                        geom.addAttribute("position", posAttr);
+                        geom.setAttribute("position", posAttr);
                         let uvAttr;
                         if (texCoordType !== undefined) {
                             uvAttr = new THREE.BufferAttribute(new Float32Array(uvArray), 2);
-                            geom.addAttribute("uv", uvAttr);
+                            geom.setAttribute("uv", uvAttr);
                         }
                         const edgeAttr = new THREE.BufferAttribute(new Float32Array(edgeArray), 1);
-                        geom.addAttribute("edge", edgeAttr);
+                        geom.setAttribute("edge", edgeAttr);
                         const wallAttr = new THREE.BufferAttribute(new Float32Array(wallArray), 1);
-                        geom.addAttribute("wall", edgeAttr);
+                        geom.setAttribute("wall", edgeAttr);
                         const indexAttr = new THREE.BufferAttribute(new Uint32Array(triangles), 1);
                         geom.setIndex(indexAttr);
                         // FIXME(HARP-5700): Subdivision modifier ignores texture coordinates.
@@ -19502,12 +19724,13 @@ class OmvDecodedTileEmitter {
                     tempVertNormal.set(0, 0, 1);
                     // Assemble the vertex buffer.
                     for (let i = 0; i < vertices.length; i += vertexStride) {
-                        OmvUtils_1.webMercatorTile2TargetWorld(extents, this.m_decodeInfo, tmpV2.set(vertices[i], vertices[i + 1]), tmpV3, true);
+                        OmvUtils_1.webMercatorTile2TargetTile(extents, this.m_decodeInfo, tmpV2.set(vertices[i], vertices[i + 1]), tmpV3, true);
                         let scaleFactor = 1.0;
                         if (isExtruded && styleSetConstantHeight !== true) {
                             tempVertOrigin.set(tempTileOrigin.x + tmpV3.x, tempTileOrigin.y + tmpV3.y, tempTileOrigin.z + tmpV3.z);
                             scaleFactor = this.m_decodeInfo.targetProjection.getScaleFactor(tempVertOrigin);
                         }
+                        this.m_maxGeometryHeight = Math.max(this.m_maxGeometryHeight, scaleFactor * height);
                         if (isSpherical) {
                             tempVertNormal
                                 .set(tmpV3.x, tmpV3.y, tmpV3.z)
@@ -19525,7 +19748,7 @@ class OmvDecodedTileEmitter {
                         }
                         if (isExtruded) {
                             positions.push(tmpV3.x + tempRoofDisp.x, tmpV3.y + tempRoofDisp.y, tmpV3.z + tempRoofDisp.z);
-                            extrusionAxis.push(tempRoofDisp.x - tempFootDisp.x, tempRoofDisp.y - tempFootDisp.y, tempRoofDisp.z - tempFootDisp.z, 0.0, tempRoofDisp.x - tempFootDisp.x, tempRoofDisp.y - tempFootDisp.y, tempRoofDisp.z - tempFootDisp.z, 1.0);
+                            extrusionAxis.push(0.0, 0.0, 0.0, 0.0, tempRoofDisp.x - tempFootDisp.x, tempRoofDisp.y - tempFootDisp.y, tempRoofDisp.z - tempFootDisp.z, 1.0);
                             if (texCoordType !== undefined) {
                                 textureCoordinates.push(vertices[i + 2], vertices[i + 3]);
                             }
@@ -19891,6 +20114,26 @@ class OmvDecodedTileEmitter {
             currRingVertex = maxRingVertex + 1;
             firstRingVertex = undefined;
         }
+    }
+    findRelativePositionInLine(p, line) {
+        let lineDist = Infinity;
+        let lineOffset = 0;
+        for (let i = 0; i < line.length; i += 4) {
+            // Find the closest point C in segment AB to point P.
+            tmpLine.set(tmpPointA.set(line[i], line[i + 1], line[i + 2]), tmpPointB.set(line[i + 4], line[i + 5], line[i + 6]));
+            tmpLine.closestPointToPoint(p, true, tmpPointC);
+            // If P is in AB (or really close), save A as anchor point and C (to estimate distance
+            // from segment origin).
+            const dist = tmpPointC.distanceTo(p);
+            if (dist < lineDist) {
+                tmpPointD.copy(tmpPointC);
+                tmpPointE.copy(tmpPointA);
+                lineDist = dist;
+                lineOffset = line[i + 3];
+            }
+        }
+        // Return the relative position of P inside the line.
+        return lineOffset + tmpPointD.distanceTo(tmpPointE);
     }
 }
 exports.OmvDecodedTileEmitter = OmvDecodedTileEmitter;
@@ -20454,7 +20697,7 @@ class OmvTileInfoEmitter {
             const infoTileTechniqueIndex = tileInfoWriter.addTechnique(technique);
             const featureText = harp_datasource_protocol_1.ExtendedTileInfo.getFeatureText(context, technique, this.m_languages);
             for (const pos of geometry) {
-                OmvUtils_1.webMercatorTile2TargetWorld(extents, this.m_decodeInfo, pos, tmpV);
+                OmvUtils_1.webMercatorTile2TargetTile(extents, this.m_decodeInfo, pos, tmpV);
                 tileInfoWriter.addFeature(this.m_tileInfo.pointGroup, context.env, featureId, featureText, infoTileTechniqueIndex, harp_datasource_protocol_1.FeatureGroupType.Point);
                 tileInfoWriter.addFeaturePoint(this.m_tileInfo.pointGroup, tmpV.x, tmpV.y);
             }
@@ -20468,7 +20711,7 @@ class OmvTileInfoEmitter {
         for (const polyline of geometry) {
             const line = [];
             for (const pos of polyline.positions) {
-                OmvUtils_1.webMercatorTile2TargetWorld(extents, this.m_decodeInfo, pos, tmpV);
+                OmvUtils_1.webMercatorTile2TargetTile(extents, this.m_decodeInfo, pos, tmpV);
                 line.push(tmpV.x, tmpV.y);
             }
             lines.push(line);
@@ -20505,7 +20748,7 @@ class OmvTileInfoEmitter {
             for (const outline of polygon.rings) {
                 const contour = [];
                 for (const pos of outline) {
-                    OmvUtils_1.webMercatorTile2TargetWorld(extents, this.m_decodeInfo, pos, tmpV);
+                    OmvUtils_1.webMercatorTile2TargetTile(extents, this.m_decodeInfo, pos, tmpV);
                     contour.push(tmpV.x, tmpV.y, tmpV.z);
                 }
                 rings.push(new OmvDecoder_1.Ring(extents, 3, contour));
@@ -20950,11 +21193,14 @@ const tempWorldPos = new THREE.Vector2();
 function webMercatorTile2TargetWorld(extents, decodeInfo, position, target, flipY = false) {
     const worldPos = tile2world(extents, decodeInfo, position, flipY, tempWorldPos);
     target.set(worldPos.x, worldPos.y, 0);
-    decodeInfo.targetProjection
-        .reprojectPoint(harp_geoutils_1.webMercatorProjection, target, target)
-        .sub(decodeInfo.center);
+    decodeInfo.targetProjection.reprojectPoint(harp_geoutils_1.webMercatorProjection, target, target);
 }
 exports.webMercatorTile2TargetWorld = webMercatorTile2TargetWorld;
+function webMercatorTile2TargetTile(extents, decodeInfo, position, target, flipY = false) {
+    webMercatorTile2TargetWorld(extents, decodeInfo, position, target, flipY);
+    target.sub(decodeInfo.center);
+}
+exports.webMercatorTile2TargetTile = webMercatorTile2TargetTile;
 
 
 /***/ }),
@@ -21026,6 +21272,7 @@ exports.StyleSetDataFilter = StyleSetDataFilter;
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 const index_decoder_1 = __webpack_require__(/*! @here/harp-datasource-protocol/index-decoder */ "../harp-datasource-protocol/index-decoder.ts");
+const harp_geoutils_1 = __webpack_require__(/*! @here/harp-geoutils */ "../harp-geoutils/index.ts");
 const three_1 = __webpack_require__(/*! three */ "three");
 const OmvUtils_1 = __webpack_require__(/*! ./OmvUtils */ "../harp-omv-datasource/lib/OmvUtils.ts");
 const VT_JSON_EXTENTS = 4096;
@@ -21085,8 +21332,24 @@ class VTJsonDataAdapter {
                     break;
                 }
                 case VTJsonGeometryType.LineString: {
+                    let untiledPositions;
+                    if (feature.originalGeometry.type === "LineString") {
+                        untiledPositions = [];
+                        for (const [x, y] of feature.originalGeometry.coordinates) {
+                            untiledPositions.push(new harp_geoutils_1.GeoCoordinates(y, x));
+                        }
+                    }
+                    else if (feature.originalGeometry.type === "MultiLineString") {
+                        untiledPositions = [];
+                        for (const lineGeometry of feature.originalGeometry
+                            .coordinates) {
+                            for (const [x, y] of lineGeometry) {
+                                untiledPositions.push(new harp_geoutils_1.GeoCoordinates(y, x));
+                            }
+                        }
+                    }
                     for (const lineGeometry of feature.geometry) {
-                        const line = { positions: [] };
+                        const line = { positions: [], untiledPositions };
                         for (const [x, y] of lineGeometry) {
                             const position = new three_1.Vector2(x, y);
                             line.positions.push(position);
@@ -22157,7 +22420,7 @@ __export(__webpack_require__(/*! ./lib/ContextLogger */ "../harp-utils/lib/Conte
 __export(__webpack_require__(/*! ./lib/PerformanceTimer */ "../harp-utils/lib/PerformanceTimer.ts"));
 __export(__webpack_require__(/*! ./lib/ObjectUtils */ "../harp-utils/lib/ObjectUtils.ts"));
 __export(__webpack_require__(/*! ./lib/OptionsUtils */ "../harp-utils/lib/OptionsUtils.ts"));
-__export(__webpack_require__(/*! ./lib/UrlResolver */ "../harp-utils/lib/UrlResolver.ts"));
+__export(__webpack_require__(/*! ./lib/UriResolver */ "../harp-utils/lib/UriResolver.ts"));
 __export(__webpack_require__(/*! ./lib/UrlUtils */ "../harp-utils/lib/UrlUtils.ts"));
 __export(__webpack_require__(/*! ./lib/UrlPlatformUtils */ "../harp-utils/lib/UrlPlatformUtils.web.ts"));
 __export(__webpack_require__(/*! ./lib/Functions */ "../harp-utils/lib/Functions.ts"));
@@ -22676,7 +22939,11 @@ class LoggerManagerImpl {
     getLogger(name) {
         return this.m_loggers.find(logger => logger.name === name);
     }
-    create(loggerName, options) {
+    create(loggerName, options = {}) {
+        if (this.m_levelSetForAll !== undefined &&
+            (options.level === undefined || options.level < this.m_levelSetForAll)) {
+            options.level = this.m_levelSetForAll;
+        }
         const logger = new Logger_1.Logger(loggerName, this.channel, options);
         this.m_loggers.push(logger);
         return logger;
@@ -22709,6 +22976,7 @@ class LoggerManagerImpl {
         this.update(loggerName, { enabled: value });
     }
     setLogLevelForAll(level) {
+        this.m_levelSetForAll = level;
         for (const logger of this.m_loggers) {
             logger.level = level;
         }
@@ -23479,6 +23747,106 @@ PerformanceTimer.nowFunc = PerformanceTimer.getNowFunc();
 
 /***/ }),
 
+/***/ "../harp-utils/lib/UriResolver.ts":
+/*!****************************************!*\
+  !*** ../harp-utils/lib/UriResolver.ts ***!
+  \****************************************/
+/*! no static exports found */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+/*
+ * Copyright (C) 2017-2019 HERE Europe B.V.
+ * Licensed under Apache 2.0, see full license in LICENSE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+const UrlUtils_1 = __webpack_require__(/*! ./UrlUtils */ "../harp-utils/lib/UrlUtils.ts");
+/**
+ * Basic, import-map like [[UriResolver]].
+ *
+ * Resolves `uris` basing on exact or prefix match of `key` from `definitions`.
+ *
+ * In definitions, `key` is matched against input uri with following strategy:
+ *  - `key` without trailing `/` -> `key` and input `uri` must be identical
+ *  - `key` with trailing `/`, -> `key` is treated as "package prefix", so `uri` must start with
+ *    `key`
+ *
+ * Example:
+ * ```
+ * {
+ *     "local://poiMasterList": "/assets/poiMasterList.json"
+ *        // will match only 'local://poiMasterList' and resolve `/assets/poiMasterList.json`
+ *     "local://icons/": "/assets/icons/"
+ *        // will match only 'local://icons/ANYPATH' (and similar) and resolve to
+ *        // `/assets/icons/ANYPATH
+ * }
+ * ```
+ * Inspired by [`WICG` import maps proposal](https://github.com/WICG/import-maps#the-import-map).
+ */
+class PrefixMapUriResolver {
+    constructor(definitions) {
+        this.definitions = definitions;
+    }
+    resolveUri(uri) {
+        return Object.keys(this.definitions).reduce((r, key) => {
+            if (key.endsWith("/") && r.startsWith(key)) {
+                const newPrefix = this.definitions[key];
+                return newPrefix + r.substr(key.length);
+            }
+            else if (r === key) {
+                return this.definitions[key];
+            }
+            return r;
+        }, uri);
+    }
+}
+exports.PrefixMapUriResolver = PrefixMapUriResolver;
+/**
+ * [UriResolver] that resolve relative `uri`s against to parent resource `uri`.
+ */
+class RelativeUriResolver {
+    constructor(parentUri) {
+        this.parentUri = parentUri;
+    }
+    resolveUri(uri) {
+        return UrlUtils_1.resolveReferenceUri(this.parentUri, uri);
+    }
+}
+exports.RelativeUriResolver = RelativeUriResolver;
+/**
+ * Compose URI resolvers.
+ *
+ * Creates new [[UriResolver]] that applies resolvers in orders or arguments.
+ *
+ * Example:
+ *
+ *     const themeUrl = ...; // url of parent object
+ *     const childUrlResolver = composeUrlResolvers(
+ *           new RelativeUriResolver(themeUrl),
+ *           defaultUrlResolver
+ *     );
+ */
+function composeUriResolvers(...resolvers) {
+    return {
+        resolveUri(originalUrl) {
+            return resolvers.reduce((url, resolver) => {
+                if (resolver !== undefined) {
+                    return resolver.resolveUri(url);
+                }
+                else {
+                    return url;
+                }
+            }, originalUrl);
+        }
+    };
+}
+exports.composeUriResolvers = composeUriResolvers;
+
+
+/***/ }),
+
 /***/ "../harp-utils/lib/UrlPlatformUtils.web.ts":
 /*!*************************************************!*\
   !*** ../harp-utils/lib/UrlPlatformUtils.web.ts ***!
@@ -23511,78 +23879,6 @@ exports.getAppBaseUrl = getAppBaseUrl;
 
 /***/ }),
 
-/***/ "../harp-utils/lib/UrlResolver.ts":
-/*!****************************************!*\
-  !*** ../harp-utils/lib/UrlResolver.ts ***!
-  \****************************************/
-/*! no static exports found */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-/*
- * Copyright (C) 2017-2019 HERE Europe B.V.
- * Licensed under Apache 2.0, see full license in LICENSE
- * SPDX-License-Identifier: Apache-2.0
- */
-Object.defineProperty(exports, "__esModule", { value: true });
-/**
- * Resolves URL using default URL resolver.
- *
- * By default URL resolver is just identity function, it can be changed using
- * [[setDefaultUrlResolver].
- */
-function defaultUrlResolver(url) {
-    if (customDefaultUrlResolver !== undefined) {
-        return customDefaultUrlResolver(url);
-    }
-    else {
-        return url;
-    }
-}
-exports.defaultUrlResolver = defaultUrlResolver;
-/**
- * Change resolver used by [[defaultUrlResolver]].
- *
- * `undefined` resets default resolver to identity function.
- *
- * @param resolver
- */
-function setDefaultUrlResolver(resolver) {
-    customDefaultUrlResolver = resolver;
-}
-exports.setDefaultUrlResolver = setDefaultUrlResolver;
-let customDefaultUrlResolver;
-/**
- * Compose URL resolvers.
- *
- * Creates new `UrlResolver` that applies resolvers in orders or arguments.
- *
- * Example:
- *
- *     const themeUrl = ...; // url of parent object
- *     const childUrlResolver = composeUrlResolvers(
- *           (childUrl: string) => resolveReferenceUrl(themeUrl, childUrl),
- *           defaultUrlResolver
- *     );
- */
-function composeUrlResolvers(...resolvers) {
-    return (originalUrl) => {
-        return resolvers.reduce((url, resolver) => {
-            if (resolver !== undefined) {
-                return resolver(url);
-            }
-            else {
-                return url;
-            }
-        }, originalUrl);
-    };
-}
-exports.composeUrlResolvers = composeUrlResolvers;
-
-
-/***/ }),
-
 /***/ "../harp-utils/lib/UrlUtils.ts":
 /*!*************************************!*\
   !*** ../harp-utils/lib/UrlUtils.ts ***!
@@ -23599,14 +23895,14 @@ exports.composeUrlResolvers = composeUrlResolvers;
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 /**
- * Resolve URL of referenced object.
+ * Resolve URI of referenced object w.r.t parent URI.
  *
- * Resolves `childUrl` as it would be loaded from location specified by `parentUrl`.
+ * Resolves `childUri` as it would be loaded from location specified by `parentUri`.
  *
- * If `childUrl` is absolute, then it is returned unchanged.
- * If `childUrl` is origin-absolute path, then only origin path is taken from `parentUrl`.
+ * If `childUri` is absolute, then it is returned unchanged.
+ * If `childUri` is origin-absolute path, then only origin path is taken from `parentUri`.
  *
- * See [[baseUrl]] for reference how base URL of `parentUrl` is determined.
+ * See [[baseUri]] for reference how base URL of `parentUri` is determined.
  *
  * Examples:
  *
@@ -23622,27 +23918,27 @@ Object.defineProperty(exports, "__esModule", { value: true });
  *     // origin-absolute URL, takes only origin from parent
  *     https://foo.com/themes/day.json + /fonts/foo.json -> https://foo.com/fonts/foo.json
  *
- * @param parentUrl URL of parent resource
- * @param childUrl URL of child as referenced from parent resource
+ * @param parentUri URI of parent resource
+ * @param childUri URI of child as referenced from parent resource
  * @return `childUrl` as if anchored in location of `parentUrl`
  */
-function resolveReferenceUrl(parentUrl, childUrl) {
-    if (absoluteUrlWithOriginRe.test(childUrl)) {
-        return childUrl;
+function resolveReferenceUri(parentUri, childUri) {
+    if (absoluteUrlWithOriginRe.test(childUri)) {
+        return childUri;
     }
-    else if (childUrl.startsWith("/")) {
-        const origin = getUrlOrigin(parentUrl);
-        return origin + childUrl;
+    else if (childUri.startsWith("/")) {
+        const origin = getUrlOrigin(parentUri);
+        return origin + childUri;
     }
     else {
-        if (childUrl.startsWith("./")) {
-            childUrl = childUrl.substr(2);
+        if (childUri.startsWith("./")) {
+            childUri = childUri.substr(2);
         }
-        const parentBaseUrl = baseUrl(parentUrl);
-        return parentBaseUrl + childUrl;
+        const parentBaseUrl = baseUrl(parentUri);
+        return parentBaseUrl + childUri;
     }
 }
-exports.resolveReferenceUrl = resolveReferenceUrl;
+exports.resolveReferenceUri = resolveReferenceUri;
 const absoluteUrlWithOriginRe = new RegExp("^(?:[a-z]+:)?//", "i");
 /**
  * Returns base URL of given resource URL.

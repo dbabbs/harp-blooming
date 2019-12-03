@@ -3,33 +3,31 @@ import flyTo from "./flyTo.js";
 const $ = (q) => document.querySelector(q);
 const $$ = (q) => document.querySelectorAll(q);
 
-const { MapView, MapControls, GeoCoordinates, OmvDataSource, 
-   APIFormat, MapViewEventNames, MapViewUtils } = harp;
+const { MapView, MapControls, GeoCoordinates, OmvDataSource, APIFormat } = harp;
+
 const config = {
    token: 'ASCBZnCcvEMa-vbk9JXixN8',
    space: 'ls1DGmar',
 }
-
-
 
 const map = new MapView({
    canvas: $("#map"),
    theme: "theme/style.json",
 });
 
-const controls = new MapControls(map);
+new MapControls(map);
 map.renderLabels = false;
 window.onresize = () => map.resize(window.innerWidth, window.innerHeight);
+map.resize(window.innerWidth, window.innerHeight)
 
 const cameraOptions = { 
-   tilt: 52, 
+   tilt: 45, 
    distance: 5000, 
    coordinates: new GeoCoordinates(37.781347, -122.391730),
    azimuth: 90 - 180
 }
 
 map.lookAt(cameraOptions.coordinates, cameraOptions.distance, cameraOptions.tilt, cameraOptions.azimuth);
-// controls.maxPitchAngle = 90;
 
 const omvDataSource = new OmvDataSource({
    name: "basemap",
@@ -43,9 +41,7 @@ map.addDataSource(omvDataSource);
 
 const traffic = new OmvDataSource({
    name: "traffic",
-   baseUrl: "https://xyz.api.here.com/hub/spaces/" + config.space + "/tile/web",
-   apiFormat: APIFormat.XYZSpace,
-   authenticationCode: config.token,
+   url: "https://xyz.api.here.com/hub/spaces/" + config.space + "/tile/web/{z}_{x}_{y}.mvtf?access_token=" + config.token, 
    gatherFeatureIds: true
 });
 
@@ -59,10 +55,7 @@ function style(val) {
             "color": [
                "concat", "hsl(", 
                [
-						// "floor", ["+", ["*", ["to-number", ["get", `properties.flows.${val}`]], 60], 200]
 						"floor", ["+", ["*", ["to-number", ["get", `properties.speeds.${18}`]], 6], 150]
-						// "floor", ["+", ["*", ["to-number", ["get", `properties.speeds.${val}`]], 10], 150]
-						// "floor", ["+", ["*", ["to-number", ["get", `properties.speeds.${val}`]], 8], 30]
                ],
                ", 100%, 44%)"
             ],
