@@ -1,7 +1,6 @@
 import flyTo from "./flyTo.js";
 
 const $ = (q) => document.querySelector(q);
-const $$ = (q) => document.querySelectorAll(q);
 
 const { MapView, MapControls, GeoCoordinates, OmvDataSource, APIFormat } = harp;
 
@@ -45,7 +44,7 @@ const traffic = new OmvDataSource({
    gatherFeatureIds: true
 });
 
-function style(val) {
+function style() {
    traffic.setStyleSet([
       {
          "when": `$geometryType ^= 'line'`,
@@ -66,9 +65,7 @@ function style(val) {
    ])
    map.update();
 }
-map.addDataSource(traffic).then(() => style(0))
-
-
+map.addDataSource(traffic).then(() => style())
 
 const bloomOptions = {
 	enabled: true,
@@ -79,7 +76,6 @@ const bloomOptions = {
 map.toneMappingExposure = 1.0;
 map.mapRenderingManager.bloom = bloomOptions;
 map.update();
-
 
 const centers = {
 	start: new GeoCoordinates(37.781347, -122.391730),

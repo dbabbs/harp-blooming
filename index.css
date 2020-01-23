@@ -1,12 +1,3 @@
-:root {
-   --background: #1A181A;
-   --secondary-background: #1E1E1E;
-   --secondary-text: #7F7F7F;
-   --line-color: #6D6D6D;
-   --border-radius: 3px;
-
-}
-
 body, html { 
    border: 0; 
    margin: 0; 
@@ -19,12 +10,4 @@ body, html {
 #map { 
    height: 100vh; 
    width: 100vw; 
-}
-
-.slider {
-   position: absolute;
-   z-index: 5000;
-   top: 0;
-	margin: 15px;
-	display: none;
 }

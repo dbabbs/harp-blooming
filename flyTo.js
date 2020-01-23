@@ -1,8 +1,6 @@
 import { map } from './index.js';
 
-const { 
-   MapViewUtils, MapViewEventNames
-} = harp;
+const { MapViewUtils, MapViewEventNames } = harp;
 
 function flyTo({
 	coordinates, 
@@ -12,15 +10,6 @@ function flyTo({
 	duration = 3000,
 	heightAtMid = 4000
 }) {
-	// console.log(map.fovCalculation)
-	// map.setFovCalculation(map.FovCalculation.type.fixed)
-	// const zoom = 12;
-	// const distance2 = MapViewUtils.calculateDistanceToGroundFromZoomLevel(map, zoom);
-	// console.log(distance2);	
-	// const calculatedZoom = MapViewUtils.calculateZoomLevelFromDistance(distance2, map);
-	// console.log('passed zoom: ' + zoom + ' calculated zoom: ' + calculatedZoom);
-
-
 
 	const startPosition = map.camera.position.clone();
    const startQuaternion = map.camera.quaternion.clone();
@@ -45,12 +34,9 @@ function flyTo({
       .clone()
       .add(targetPosition)
       .multiplyScalar(0.5);
+
    middlePosition.setZ(
 		heightAtMid
-      // startPosition
-      //    .clone()
-      //    .sub(targetPosition)
-      //    .length()
    );
 
    const curve = new THREE.CatmullRomCurve3([startPosition, middlePosition, targetPosition]);
@@ -59,7 +45,6 @@ function flyTo({
       const time = Date.now();
 		let t = (time - startTime) / duration;
 		
-
       if (t >= 1) {
          t = 1;
          map.endAnimation();
